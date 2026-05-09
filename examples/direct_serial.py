@@ -24,7 +24,7 @@ async def main() -> int:
         print("Usage: direct_serial.py <device-path>", file=sys.stderr)
         return 2
     transport = SerialTransport(sys.argv[1])
-    client = LumagenClient(transport, startup_delay=0.0)
+    client = LumagenClient(transport)
 
     def on_update(state: LumagenState, codes: tuple[str, ...]) -> None:
         print(f"[{','.join(codes):<8}] power={state.power_on} input={state.current_input}")

@@ -3,14 +3,15 @@
 Composes a :class:`~pylumagen.transport.base.LumagenTransport` with a
 :class:`~pylumagen.protocol.LumagenProtocol` and exposes the commands a
 typical consumer (the ``ha-lumagen`` HA integration, tests, scripts)
-needs. Implements the startup handshake — USB-enumeration wait, echo-off
-mode, initial status queries — and runs a background poll loop so that
-unsolicited reports aren't the only way to stay in sync.
+needs. Implements the startup handshake (``ZE2`` + initial status
+queries) and runs a background poll loop so unsolicited reports aren't
+the only way to stay in sync.
 
 The old ESPHome firmware waited 18 s on boot for the FTDI chip to
-enumerate before sending anything. That delay moves here so it applies
-whichever transport is in use. We'll likely be able to tune it down once
-we have telemetry on reconnects; for now it's a configurable parameter.
+enumerate before sending anything. That protection is optional here
+(see ``startup_delay`` on :class:`LumagenClient`) because in every
+non-cold-boot case the ESP is already enumerated by the time we
+attach. Default is no delay; bump it if you hit reconnect races.
 """
 
 from __future__ import annotations
@@ -42,10 +43,12 @@ class LumagenClient:
     :param transport: Pre-constructed transport. Its data callback will be
         wired during :meth:`start`.
     :param startup_delay: Seconds to wait after ``transport.connect()``
-        before sending anything. Matches the Lumagen's USB-enumeration
-        warmup when going through the ESP bridge. Defaults to 18 s (the
-        value proven out by the old firmware); set lower to accelerate
-        tests, or 0 to skip entirely when using direct serial.
+        before sending anything. Defaults to 0 (no wait) — the ESP is
+        assumed to be already enumerated by the time a client attaches,
+        which matches every real-world case except a cold boot.
+        If you hit "ZE2 sent before FTDI enumeration finishes" issues
+        after an ESP reboot, bump this (e.g. 18 s was the old firmware's
+        cold-boot value).
     :param power_poll_interval: Seconds between background power polls.
         ``None`` disables polling entirely (pure push mode).
     :param status_poll_interval: Seconds between ``ZQI24`` polls when the
@@ -56,7 +59,7 @@ class LumagenClient:
         self,
         transport: LumagenTransport,
         *,
-        startup_delay: float = 18.0,
+        startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
         status_poll_interval: float | None = 60.0,
     ) -> None:
