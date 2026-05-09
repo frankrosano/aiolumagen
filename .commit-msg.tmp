@@ -1,7 +1,0 @@
-chore: default LumagenClient.startup_delay to 0
-
-The 18s delay was only ever needed for the cold-boot case where the ESP
-has just enumerated the FTDI chip. Every non-cold-boot path (HA
-integration reconnect, tests, dev scripts) paid that cost unnecessarily.
-Parameter stays configurable for future cold-boot testing; both example
-scripts now use the default.
