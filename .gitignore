@@ -227,3 +227,6 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Agent-tool scratch files (used by Kiro to hand commit messages to git)
+.commit-msg.tmp
