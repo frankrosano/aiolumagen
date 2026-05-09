@@ -8,19 +8,17 @@ from typing import Any
 
 import pytest
 
-from pylumagen.transport.base import LumagenTransport
 
-
-class FakeTransport(LumagenTransport):
-    """In-memory transport for integration-style tests.
+class FakeTransport:
+    """In-memory transport stub that implements the duck-typed client contract.
 
     Tests push inbound bytes with :meth:`feed` and inspect outbound writes
-    via :attr:`sent`. No asyncio timing involved — everything resolves
+    via :attr:`sent`. No asyncio scheduling involved — everything resolves
     synchronously inside the ``async`` wrapper.
     """
 
     def __init__(self) -> None:
-        super().__init__()
+        self._on_data: Callable[[bytes], None] | None = None
         self.sent: list[bytes] = []
         self._connected = False
         self.connect_hook: Callable[[], Any] | None = None
@@ -28,6 +26,9 @@ class FakeTransport(LumagenTransport):
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def set_data_callback(self, callback: Callable[[bytes], None]) -> None:
+        self._on_data = callback
 
     async def connect(self) -> None:
         self._connected = True
@@ -46,7 +47,8 @@ class FakeTransport(LumagenTransport):
         """Simulate inbound bytes from the Lumagen."""
         if isinstance(data, str):
             data = data.encode("ascii")
-        self._emit(data)
+        if self._on_data is not None and data:
+            self._on_data(data)
 
 
 @pytest.fixture

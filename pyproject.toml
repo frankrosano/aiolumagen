@@ -23,8 +23,7 @@ classifiers = [
     "Topic :: Multimedia :: Video",
 ]
 dependencies = [
-    "aioesphomeapi>=44",
-    "pyserial-asyncio>=0.6",
+    "serialx[esphome]>=1.7",
 ]
 
 [project.urls]

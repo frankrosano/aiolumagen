@@ -20,14 +20,35 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from typing import Protocol
 
 from pylumagen.commands import ECHO_OFF_WITH_STATUS, Query, input_command
 from pylumagen.exceptions import LumagenConnectionError, LumagenError
 from pylumagen.protocol import LumagenProtocol
 from pylumagen.state import LumagenState
-from pylumagen.transport.base import LumagenTransport
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _TransportLike(Protocol):
+    """Minimal transport contract the client depends on.
+
+    Concrete implementations: :class:`pylumagen.transport.LumagenTransport`
+    for real connections, and a lightweight in-memory fake in
+    ``tests/conftest.py`` for unit tests. The contract is intentionally
+    duck-typed — no ABC — because there's only ever one real transport.
+    """
+
+    @property
+    def connected(self) -> bool: ...
+
+    def set_data_callback(self, callback: Callable[[bytes], None]) -> None: ...
+
+    async def connect(self) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def write(self, data: bytes) -> None: ...
 
 
 StateListener = Callable[[LumagenState, tuple[str, ...]], None]
@@ -57,7 +78,7 @@ class LumagenClient:
 
     def __init__(
         self,
-        transport: LumagenTransport,
+        transport: _TransportLike,
         *,
         startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
