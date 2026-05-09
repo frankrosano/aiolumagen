@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pylumagen"
+version = "0.1.0"
+description = "Async Python library for the Lumagen Radiance Pro RS-232 protocol, with direct-serial and ESPHome serial-proxy transports."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Frank Rosano" }]
+keywords = ["lumagen", "radiance-pro", "home-assistant", "esphome", "video-processor", "rs232"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = [
+    "aioesphomeapi>=44",
+    "pyserial-asyncio>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/frankrosano/pylumagen"
+Repository = "https://github.com/frankrosano/pylumagen"
+Issues = "https://github.com/frankrosano/pylumagen/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "ruff>=0.7",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pylumagen"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/pylumagen",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",     # pycodestyle, pyflakes
+    "I",               # isort
+    "N",               # pep8-naming
+    "UP",              # pyupgrade
+    "B",               # flake8-bugbear
+    "A",               # flake8-builtins
+    "C4",              # flake8-comprehensions
+    "SIM",             # flake8-simplify
+    "RUF",             # ruff-specific
+]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true

@@ -1,0 +1,178 @@
+"""LumagenProtocol unit tests.
+
+These exercise the parser against the exact response shapes documented in
+``References/Tip0011_RS232CommandInterface_111023.pdf``. When changing the
+protocol code, update these first.
+"""
+
+from __future__ import annotations
+
+from pylumagen.protocol import LumagenProtocol
+from pylumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
+
+
+def _collect() -> tuple[list[tuple[LumagenState, tuple[str, ...]]], LumagenProtocol]:
+    updates: list[tuple[LumagenState, tuple[str, ...]]] = []
+
+    def on_update(state: LumagenState, codes: tuple[str, ...]) -> None:
+        updates.append((state, codes))
+
+    return updates, LumagenProtocol(on_update)
+
+
+def test_s00_sets_alive_once() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S00\r\n")
+    assert len(updates) == 1
+    state, codes = updates[0]
+    assert state.alive is True
+    assert codes == ("S00",)
+
+    # Second !S00 with no state change should not fire a callback
+    proto.feed_bytes(b"!S00\r\n")
+    assert len(updates) == 1
+
+
+def test_s02_power_on_then_off() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S02,1\r\n")
+    proto.feed_bytes(b"!S02,0\r\n")
+    assert [u[0].power_on for u in updates] == [True, False]
+
+
+def test_s01_device_info_splits_model_and_firmware() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S01,RadiancePro,030225,1018,000000\r\n")
+    state, _ = updates[-1]
+    assert state.model == "RadiancePro"
+    assert state.firmware == "030225"
+    assert state.device_info_raw == "RadiancePro,030225,1018,000000"
+
+
+def test_echo_prefix_is_tolerated() -> None:
+    """Lumagen can echo the query command before the response on the same line."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"ZQS01!S01,RadiancePro,030225,1018,000000\r\n")
+    assert updates[-1][0].model == "RadiancePro"
+
+
+def test_i00_input_and_memory() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I00,03,B,01\r\n")
+    state, _ = updates[-1]
+    assert state.current_input == "03"
+    assert state.input_memory == "B"
+
+
+def test_i24_full_status_populates_all_fields() -> None:
+    updates, proto = _collect()
+    # 23 fields per the field-index map in protocol.py
+    line = (
+        "!I24,"
+        "1,"      # [0]  input status = Active
+        "060,"    # [1]  source vrate
+        "2160,"   # [2]  source resolution
+        "0,"      # [3]  D
+        "0,"      # [4]  X
+        "178,"    # [5]  source aspect = 1.78
+        "185,"    # [6]  content aspect = 1.85
+        "0,"      # [7]  Y
+        "0,"      # [8]  T
+        "3840,"   # [9]  WWWW
+        "0,"      # [10] C
+        "0,"      # [11] B
+        "060,"    # [12] output vrate
+        "2160,"   # [13] output resolution
+        "000,"    # [14] ZZZ
+        "3,"      # [15] colorspace = Rec.2100
+        "1,"      # [16] HDR flag = HDR
+        "p,"      # [17] source mode = progressive
+        "0,"      # [18] H
+        "05,"     # [19] virtual input = 5
+        "00,"     # [20] KK
+        "000,"    # [21] JJJ
+        "000"     # [22] LLL
+        "\r\n"
+    )
+    proto.feed_bytes(line.encode("ascii"))
+    state, codes = updates[-1]
+    assert codes == ("I24",)
+    assert state.input_status is InputStatus.ACTIVE
+    assert state.source_vrate == "060"
+    assert state.source_resolution == "2160"
+    assert state.source_aspect == "178"
+    assert state.content_aspect == "185"
+    assert state.output_vrate == "060"
+    assert state.output_resolution == "2160"
+    assert state.colorspace is Colorspace.REC_2100
+    assert state.is_hdr is True
+    assert state.hdr_status is HdrStatus.HDR
+    assert state.source_mode is SourceMode.PROGRESSIVE
+    assert state.current_input == "05"  # I24 field [19] beats I00's field [0]
+
+
+def test_i24_no_source_leaves_is_hdr_false() -> None:
+    updates, proto = _collect()
+    # Truncated I24 with only a handful of leading fields — mimics a
+    # "no source" report.
+    proto.feed_bytes(b"!I24,0,000,0000,0,0,000,000\r\n")
+    state, _ = updates[-1]
+    assert state.input_status is InputStatus.NO_SOURCE
+    assert state.is_hdr is None  # not enough fields to populate HDR
+
+
+def test_i21_i22_i23_use_shared_leading_fields() -> None:
+    updates, proto = _collect()
+    # I22 shape — same leading field order as I24
+    proto.feed_bytes(b"!I22,1,060,1080,0,0,178,178,0,0,1920,0,0,060,1080\r\n")
+    state, _ = updates[-1]
+    assert state.input_status is InputStatus.ACTIVE
+    assert state.source_resolution == "1080"
+    assert state.output_resolution == "1080"
+    # I22 does not carry colorspace / HDR
+    assert state.colorspace is None
+    assert state.is_hdr is None
+
+
+def test_buffered_partial_line_then_completion() -> None:
+    """Inbound bytes may arrive fragmented. The parser must buffer partial lines."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S02,")
+    assert updates == []
+    proto.feed_bytes(b"1\r\n")
+    assert len(updates) == 1
+    assert updates[-1][0].power_on is True
+
+
+def test_two_responses_on_one_feed() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S02,1\r\n!S00\r\n")
+    assert len(updates) == 2
+    assert updates[0][0].power_on is True
+    assert updates[1][0].alive is True
+
+
+def test_unknown_code_is_ignored() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!ZZZ,whatever\r\n")
+    assert updates == []
+
+
+def test_state_equality_enables_always_update_false() -> None:
+    """Two fresh states must compare equal — prerequisite for coordinator skip."""
+    assert LumagenState() == LumagenState()
+
+
+def test_echo_only_line_without_bang_is_ignored() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"ZQS02\r\n")
+    assert updates == []
+
+
+def test_reset_discards_partial_line() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S02,")
+    proto.reset()
+    proto.feed_bytes(b"1\r\n")
+    # After reset, the remainder "1\r\n" has no ! and is ignored.
+    assert updates == []
