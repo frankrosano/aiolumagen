@@ -284,10 +284,25 @@ class LumagenClient:
     async def _poll_loop(self) -> None:
         """Poll at the shorter of the two intervals; gate ZQI24 on power.
 
-        Also checks for staleness: if no response has been received within
-        ``stale_timeout``, marks the client as unavailable and notifies
-        listeners with a synthetic update so the coordinator can mark
-        entities unavailable in HA.
+        Also checks for staleness. If no response arrives within
+        ``stale_timeout`` we:
+          1. Mark the client as unavailable and notify listeners so the
+             coordinator flags entities unavailable in HA.
+          2. Force a full transport disconnect + reconnect cycle.
+
+        The reconnect is required because of an ESP-side quirk: when the
+        USB cable is hot-unplugged and re-plugged, the ESP's serial_proxy
+        forgets to forward incoming bytes to existing subscribers even
+        though writes still work and the underlying UART channel has been
+        reinitialized. A fresh serialx connection triggers a fresh
+        subscription on the ESP, which picks up where the old one failed.
+
+        Validated empirically: in direct ESP-log testing (with
+        ``usb_uart_ftdi.debug: true``), writes-from-HA and reads-from-
+        Lumagen both show up after a USB hot-plug, but HA entities stay
+        unavailable until the integration is reloaded. A transport
+        reconnect is functionally identical to an integration reload from
+        the ESP's perspective.
         """
         p_iv = self._power_poll_interval
         s_iv = self._status_poll_interval
@@ -313,21 +328,26 @@ class LumagenClient:
                     _LOGGER.warning("Lumagen poll failed: %s", err)
 
                 # Staleness check: if we were available but haven't heard
-                # back in stale_timeout seconds, mark unavailable and
-                # notify listeners. We do NOT attempt automatic recovery
-                # here — hot-plug recovery is an upstream ESPHome concern
-                # and timing-based reconnects caused more problems than
-                # they solved. The user's workaround is to restart the
-                # ESP after a physical cable disturbance.
+                # back in stale_timeout seconds, mark unavailable, notify,
+                # and force a fresh subscription via transport reconnect.
                 if self._available and not self.available:
                     self._available = False
                     _LOGGER.warning(
-                        "Lumagen is now unavailable (no response in %.0fs)",
+                        "Lumagen is now unavailable (no response in %.0fs), "
+                        "forcing transport reconnect",
                         self._stale_timeout,
                     )
                     for listener in list(self._listeners):
                         with suppress(Exception):
                             listener(self._protocol.state, ("_unavailable",))
+                    try:
+                        await self._transport.disconnect()
+                        await asyncio.sleep(1.0)
+                        await self._transport.connect()
+                        self._protocol.reset()
+                        await self._send_startup_sequence()
+                    except LumagenConnectionError as err:
+                        _LOGGER.warning("Reconnect failed: %s", err)
         except asyncio.CancelledError:
             raise
 
