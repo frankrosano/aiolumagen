@@ -83,17 +83,21 @@ class LumagenClient:
         startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
         status_poll_interval: float | None = 60.0,
+        stale_timeout: float = 120.0,
     ) -> None:
         self._transport = transport
         self._startup_delay = startup_delay
         self._power_poll_interval = power_poll_interval
         self._status_poll_interval = status_poll_interval
+        self._stale_timeout = stale_timeout
         self._protocol = LumagenProtocol(self._on_protocol_update)
         self._listeners: list[StateListener] = []
         self._async_listeners: list[AsyncStateListener] = []
         self._listener_tasks: set[asyncio.Task[None]] = set()
         self._poll_task: asyncio.Task[None] | None = None
         self._started = False
+        self._last_response_time: float | None = None
+        self._available = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -139,6 +143,22 @@ class LumagenClient:
     @property
     def connected(self) -> bool:
         return self._transport.connected
+
+    @property
+    def available(self) -> bool:
+        """True when the Lumagen is actively responding.
+
+        Becomes True on the first successful response, and reverts to False
+        if no response has been received within ``stale_timeout`` seconds
+        (default 120s = 2 missed poll cycles). This lets HA mark entities
+        as unavailable when the serial channel is lost mid-session.
+        """
+        if not self._available:
+            return False
+        if self._last_response_time is None:
+            return False
+        elapsed = asyncio.get_event_loop().time() - self._last_response_time
+        return elapsed < self._stale_timeout
 
     # ------------------------------------------------------------------
     # Listeners
@@ -262,7 +282,13 @@ class LumagenClient:
         )
 
     async def _poll_loop(self) -> None:
-        """Poll at the shorter of the two intervals; gate ZQI24 on power."""
+        """Poll at the shorter of the two intervals; gate ZQI24 on power.
+
+        Also checks for staleness: if no response has been received within
+        ``stale_timeout``, marks the client as unavailable and notifies
+        listeners with a synthetic update so the coordinator can mark
+        entities unavailable in HA.
+        """
         p_iv = self._power_poll_interval
         s_iv = self._status_poll_interval
         base = min(v for v in (p_iv, s_iv) if v is not None)
@@ -285,10 +311,29 @@ class LumagenClient:
                         s_due = now + s_iv
                 except LumagenConnectionError as err:
                     _LOGGER.warning("Lumagen poll failed: %s", err)
+
+                # Staleness check: if we were available but haven't heard
+                # back in stale_timeout seconds, mark unavailable and
+                # notify listeners so HA can react.
+                if self._available and not self.available:
+                    self._available = False
+                    _LOGGER.warning(
+                        "Lumagen is now unavailable (no response in %.0fs)",
+                        self._stale_timeout,
+                    )
+                    # Fire a synthetic update so the coordinator sees the
+                    # availability change and marks entities unavailable.
+                    for listener in list(self._listeners):
+                        with suppress(Exception):
+                            listener(self._protocol.state, ("_unavailable",))
         except asyncio.CancelledError:
             raise
 
     def _on_protocol_update(self, state: LumagenState, codes: tuple[str, ...]) -> None:
+        self._last_response_time = asyncio.get_event_loop().time()
+        if not self._available:
+            self._available = True
+            _LOGGER.info("Lumagen is now available (first response received)")
         for listener in list(self._listeners):
             try:
                 listener(state, codes)
