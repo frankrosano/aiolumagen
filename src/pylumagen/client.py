@@ -210,21 +210,56 @@ class LumagenClient:
     # ------------------------------------------------------------------
 
     async def _send_startup_sequence(self) -> None:
-        """ZE2 echo-off, then the initial queries. Errors are non-fatal."""
-        try:
-            await self.send_command(ECHO_OFF_WITH_STATUS)
-            await asyncio.sleep(0.5)
-            await self.query_device_info()
-            await asyncio.sleep(1.0)
-            await self.query_power()
-            await asyncio.sleep(1.0)
-            await self.query_input_info()
-            await asyncio.sleep(1.0)
-            await self.query_full_status()
-        except LumagenConnectionError:
-            # Startup queries run best-effort. If the bridge just dropped,
-            # the poll loop / caller will surface the real error.
-            _LOGGER.warning("Lumagen startup queries aborted — transport disconnected")
+        """ZE2 echo-off, then initial queries with retry.
+
+        The ESP's USB-UART channel may not be ready immediately after boot
+        (FTDI enumeration takes ~10-15s). Commands sent before the channel
+        initializes are silently dropped. We retry the handshake up to
+        ``_startup_max_retries`` times, waiting ``_startup_retry_interval``
+        between attempts, checking for a ``!S01`` response (model field
+        populated) as the success signal.
+        """
+        max_retries = 5
+        retry_interval = 4.0  # seconds between attempts
+
+        for attempt in range(max_retries):
+            try:
+                await self.send_command(ECHO_OFF_WITH_STATUS)
+                await asyncio.sleep(0.3)
+                await self.query_device_info()
+                await asyncio.sleep(0.3)
+                await self.query_power()
+                await asyncio.sleep(0.3)
+                await self.query_input_info()
+                await asyncio.sleep(0.3)
+                await self.query_full_status()
+            except LumagenConnectionError:
+                _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
+                return
+
+            # Wait for !S01 to confirm the Lumagen actually received our queries.
+            deadline = asyncio.get_running_loop().time() + retry_interval
+            while asyncio.get_running_loop().time() < deadline:
+                if self._protocol.state.model is not None:
+                    _LOGGER.debug(
+                        "Lumagen startup handshake succeeded on attempt %d", attempt + 1
+                    )
+                    return
+                await asyncio.sleep(0.2)
+
+            if attempt < max_retries - 1:
+                _LOGGER.debug(
+                    "Lumagen startup attempt %d/%d got no response, retrying",
+                    attempt + 1,
+                    max_retries,
+                )
+
+        _LOGGER.warning(
+            "Lumagen startup handshake: no response after %d attempts "
+            "(%.0fs total). The poll loop will continue trying.",
+            max_retries,
+            max_retries * retry_interval,
+        )
 
     async def _poll_loop(self) -> None:
         """Poll at the shorter of the two intervals; gate ZQI24 on power."""

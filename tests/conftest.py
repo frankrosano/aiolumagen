@@ -42,6 +42,10 @@ class FakeTransport:
 
     async def write(self, data: bytes) -> None:
         self.sent.append(data)
+        # Auto-respond to ZQS01 so the startup handshake's retry loop
+        # completes immediately rather than burning 20s of real time.
+        if data == b"ZQS01" and self._on_data is not None:
+            self._on_data(b"!S01,FakeModel,000000,0000,000000\r\n")
 
     def feed(self, data: bytes | str) -> None:
         """Simulate inbound bytes from the Lumagen."""

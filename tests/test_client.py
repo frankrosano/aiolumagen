@@ -63,6 +63,8 @@ async def test_unsubscribe_stops_updates(
     received: list[LumagenState] = []
     unsubscribe = client.subscribe(lambda state, _codes: received.append(state))
     await client.start()
+    # Clear any startup-handshake updates (e.g. auto-fed !S01)
+    received.clear()
     fake_transport.feed(b"!S02,1\r\n")
     unsubscribe()
     fake_transport.feed(b"!S02,0\r\n")

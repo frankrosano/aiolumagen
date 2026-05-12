@@ -38,9 +38,13 @@ async def main() -> int:
     transport = LumagenTransport(sys.argv[1])
     client = LumagenClient(transport)
 
+    start = asyncio.get_running_loop().time()
+
     def on_update(state: LumagenState, codes: tuple[str, ...]) -> None:
+        elapsed = asyncio.get_running_loop().time() - start
         print(
-            f"[{','.join(codes):<8}] power={state.power_on} input={state.current_input} "
+            f"[{elapsed:6.3f}s] [{','.join(codes):<8}] "
+            f"power={state.power_on} input={state.current_input} "
             f"resolution={state.source_resolution}@{state.source_vrate} "
             f"hdr={state.hdr_status} colorspace={state.colorspace}"
         )
