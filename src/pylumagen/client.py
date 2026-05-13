@@ -110,7 +110,12 @@ class LumagenClient:
         """
         if self._started:
             return
-        self._transport.set_data_callback(self._protocol.feed_bytes)
+        # Wrap the protocol's feed_bytes so we can track liveness at the
+        # byte-stream level. The protocol layer suppresses callbacks when
+        # state doesn't change (the publish_if_changed optimization), so we
+        # can't rely on state-update callbacks alone — a steady-state
+        # Lumagen would look unresponsive even while polls succeed.
+        self._transport.set_data_callback(self._on_bytes_received)
         await self._transport.connect()
         self._started = True
         if self._startup_delay > 0:
@@ -148,10 +153,12 @@ class LumagenClient:
     def available(self) -> bool:
         """True when the Lumagen is actively responding.
 
-        Becomes True on the first successful response, and reverts to False
-        if no response has been received within ``stale_timeout`` seconds
-        (default 120s = 2 missed poll cycles). This lets HA mark entities
-        as unavailable when the serial channel is lost mid-session.
+        Becomes True on the first inbound bytes, reverts to False if no
+        bytes have arrived within ``stale_timeout`` seconds (default 90s =
+        1.5 missed poll cycles). This lets HA mark entities unavailable
+        when the serial channel is lost mid-session. Tracks raw bytes
+        rather than state changes so a steady-state Lumagen (polls
+        succeeding but returning identical data) still counts as alive.
         """
         if not self._available:
             return False
@@ -351,11 +358,22 @@ class LumagenClient:
         except asyncio.CancelledError:
             raise
 
-    def _on_protocol_update(self, state: LumagenState, codes: tuple[str, ...]) -> None:
+    def _on_bytes_received(self, data: bytes) -> None:
+        """Called for every inbound chunk — updates liveness + feeds parser.
+
+        This is the liveness source of truth: any bytes arriving from the
+        Lumagen (even a no-op poll response that doesn't change state)
+        count as "the channel is healthy". The protocol layer's state-
+        change callback is strictly narrower — use it for state, not
+        liveness.
+        """
         self._last_response_time = asyncio.get_event_loop().time()
         if not self._available:
             self._available = True
             _LOGGER.info("Lumagen is now available (first response received)")
+        self._protocol.feed_bytes(data)
+
+    def _on_protocol_update(self, state: LumagenState, codes: tuple[str, ...]) -> None:
         for listener in list(self._listeners):
             try:
                 listener(state, codes)

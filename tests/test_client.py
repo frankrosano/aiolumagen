@@ -129,3 +129,65 @@ async def test_poll_loop_skips_status_when_powered_off(
     await asyncio.sleep(0.12)
     await c.stop()
     assert all(b"ZQI24" not in chunk for chunk in fake_transport.sent)
+
+
+async def test_liveness_tracks_bytes_not_state_changes(
+    fake_transport: FakeTransport,
+) -> None:
+    """Steady-state polls (bytes arrive but state doesn't change) keep the
+    client available. Regression for the bug where liveness was tied to
+    state-change callbacks, which the parser suppresses when the Lumagen's
+    values are unchanged — leading to false-positive stale detection on
+    an idle but responsive device.
+
+    Uses a long stale_timeout so the test isn't sensitive to the
+    startup-sequence's internal asyncio.sleep delays.
+    """
+    c = LumagenClient(
+        fake_transport,
+        startup_delay=0.0,
+        power_poll_interval=None,
+        status_poll_interval=None,
+        stale_timeout=10.0,
+    )
+    await c.start()
+    # The FakeTransport auto-feeds !S01 on the startup ZQS01, so the
+    # client is available after start().
+    assert c.available is True
+    first_response_time = c._last_response_time
+    assert first_response_time is not None
+
+    # Feed an identical !S01 — same model/firmware as before. The parser
+    # will NOT fire a state-change callback because nothing changed, but
+    # the byte stream should still refresh liveness.
+    fake_transport.feed(b"!S01,FakeModel,000000,0000,000000\r\n")
+    assert c._last_response_time is not None
+    assert c._last_response_time > first_response_time
+    assert c.available is True
+
+    await c.stop()
+
+
+async def test_available_goes_false_on_true_silence(
+    fake_transport: FakeTransport,
+) -> None:
+    """When no bytes arrive at all for stale_timeout, available flips to False.
+
+    Sets stale_timeout slightly longer than the startup sequence (~1.2s of
+    asyncio.sleep) so it's reached *after* startup completes.
+    """
+    c = LumagenClient(
+        fake_transport,
+        startup_delay=0.0,
+        power_poll_interval=None,
+        status_poll_interval=None,
+        stale_timeout=2.0,
+    )
+    await c.start()
+    assert c.available is True
+
+    # No feed, just wait past the stale_timeout.
+    await asyncio.sleep(2.5)
+    assert c.available is False
+
+    await c.stop()
