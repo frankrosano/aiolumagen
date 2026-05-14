@@ -83,7 +83,7 @@ class LumagenClient:
         startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
         status_poll_interval: float | None = 60.0,
-        stale_timeout: float = 90.0,
+        stale_timeout: float = 45.0,
     ) -> None:
         self._transport = transport
         self._startup_delay = startup_delay
@@ -154,9 +154,8 @@ class LumagenClient:
         """True when the Lumagen is actively responding.
 
         Becomes True on the first inbound bytes, reverts to False if no
-        bytes have arrived within ``stale_timeout`` seconds (default 90s =
-        1.5 missed poll cycles). This lets HA mark entities unavailable
-        when the serial channel is lost mid-session. Tracks raw bytes
+        bytes have arrived within ``stale_timeout`` seconds (default 45s,
+        roughly three quarters of one poll cycle). Tracks raw bytes
         rather than state changes so a steady-state Lumagen (polls
         succeeding but returning identical data) still counts as alive.
         """
@@ -239,15 +238,17 @@ class LumagenClient:
     async def _send_startup_sequence(self) -> None:
         """ZE2 echo-off, then initial queries with retry.
 
-        The ESP's USB-UART channel may not be ready immediately after boot
-        (FTDI enumeration takes ~10-15s). Commands sent before the channel
-        initializes are silently dropped. We retry the handshake up to
-        ``_startup_max_retries`` times, waiting ``_startup_retry_interval``
-        between attempts, checking for a ``!S01`` response (model field
-        populated) as the success signal.
+        Empirically the ESP's USB-UART channel re-initialises in tens of
+        milliseconds (see ESP logs: 33ms from "Open device" to "Baud
+        9600 set"). Two attempts at 1.5 seconds apart is plenty of
+        headroom — the first attempt almost always succeeds. The retry
+        only matters when we attach during a cold ESP boot before the
+        FTDI has been seen at all, which is rare in practice because
+        ha-lumagen's coordinator setup waits for the esphome integration
+        first.
         """
-        max_retries = 5
-        retry_interval = 4.0  # seconds between attempts
+        max_retries = 2
+        retry_interval = 1.5  # seconds between attempts
 
         for attempt in range(max_retries):
             try:
