@@ -231,3 +231,5 @@ htmlcov/
 # Agent-tool scratch files (used by Kiro to hand commit messages to git)
 .commit-msg.tmp
 .commit-msg.*.tmp
+
+uv.lock
