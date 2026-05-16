@@ -74,14 +74,18 @@ class LumagenClient:
         constructor's ValueError below for details.
     """
 
-    # Delays (seconds, after a control command) at which we re-poll the
-    # Lumagen so listeners see the change quickly without waiting for the
-    # next 60s background poll. Two ticks are enough: the first catches
-    # fast changes (input switch, aspect, memory, OSD nav), the second
-    # catches slow ones (power-on, which can take a few seconds for the
-    # !S02 reply to reflect the new state). Without this, button presses
-    # take up to one full poll interval (~60s) to show in the UI.
-    REFRESH_TICKS: tuple[float, ...] = (0.5, 5.0)
+    # Delay (seconds, after a control command) at which we re-poll the
+    # Lumagen so listeners see power-state changes without waiting for the
+    # next 60s background poll. Power transitions are the only state the
+    # Lumagen can't push via "Full v4" unsolicited reporting — the device
+    # doesn't emit !I24 while in standby, and the on/off transition takes
+    # a few seconds to settle. For everything else (input switch, aspect,
+    # memory, OSD nav) Full v4 reports the change in real time, so a fast
+    # tick would just be redundant. Users who haven't enabled Full v4 fall
+    # back to the 60s background poll for non-power changes; the
+    # integration's iot_class is "local_push" so Full v4 is the
+    # documented happy path.
+    REFRESH_TICKS: tuple[float, ...] = (5.0,)
 
     def __init__(
         self,
@@ -225,12 +229,13 @@ class LumagenClient:
             if ``cr=True``).
         :param cr: Append a carriage return. Only a handful of Lumagen
             commands need this — consult the RS-232 doc before setting it.
-        :param refresh: If True (default), schedule follow-up status
-            queries so listeners see the result of this command without
-            waiting for the next background poll. Suppressed automatically
-            for query commands (anything starting with ``Z``) so we don't
-            recurse — and also suppressed when no poll loop is running, so
-            unit tests of the raw command path stay clean. Pass
+        :param refresh: If True (default), schedule a follow-up status
+            query 5 s after this command so power-on / standby transitions
+            (which the Lumagen cannot push via Full v4) reach listeners
+            without a 60 s poll wait. Suppressed automatically for query
+            commands (anything starting with ``Z``) so we don't recurse —
+            and also suppressed when no poll loop is running, so unit
+            tests of the raw command path stay clean. Pass
             ``refresh=False`` for fire-and-forget commands where the
             caller doesn't care about the new state.
         """
@@ -276,13 +281,19 @@ class LumagenClient:
         await self.send_command(Query.FULL_STATUS.value)
 
     def request_refresh(self) -> None:
-        """Schedule follow-up status queries so listeners see fresh state soon.
+        """Schedule a follow-up status query for power-transition coverage.
 
         Fires :meth:`query_power` + :meth:`query_full_status` at each tick
-        in :attr:`REFRESH_TICKS` (default ``(0.5, 5.0)`` seconds). Multiple
-        calls coalesce — an already-running schedule is cancelled and
-        restarted, so a burst of commands produces a single refresh window
-        anchored on the most recent call.
+        in :attr:`REFRESH_TICKS` (default ``(5.0,)``). The single 5 s tick
+        catches power-on/standby transitions, which the Lumagen cannot
+        push via "Full v4" unsolicited reporting (no !I24 emitted while in
+        standby; on/off transition takes a few seconds to settle on the
+        device side). Other state changes — input, aspect, memory, OSD —
+        flow through Full v4 in real time and don't need a tick.
+
+        Multiple calls coalesce: an in-flight schedule is cancelled and
+        restarted, so a burst of commands produces one window anchored on
+        the most recent press, not N stacked.
 
         Called automatically by :meth:`send_command` for non-query commands
         when a poll loop is running. Manual callers normally don't need
@@ -361,13 +372,12 @@ class LumagenClient:
         Runs as a background task spawned by :meth:`request_refresh`. Each
         tick is an absolute delay from t=0 (when the task started); the
         loop sleeps the diff between the previous tick and the next so a
-        ``(0.5, 5.0)`` schedule fires at t+0.5s and t+5.0s, not
-        t+0.5s and t+5.5s. Each tick sends ``ZQS02`` (power) +
-        ``ZQI24`` (full status); together they cover every state field
-        the buttons / selects can change. Errors are logged at debug level
-        but don't abort the schedule — a transient transport blip on the
-        first tick shouldn't suppress the second tick's chance to catch
-        the change.
+        ``(5.0,)`` schedule fires once at t+5 s. Each tick sends ``ZQS02``
+        (power) + ``ZQI24`` (full status); together they cover every state
+        field the buttons / selects can change, which keeps the schedule
+        flexible if more ticks are ever added. Errors are logged at debug
+        level but don't abort the schedule — a transient transport blip on
+        one tick shouldn't suppress remaining ticks.
         """
         previous = 0.0
         for tick in self.REFRESH_TICKS:

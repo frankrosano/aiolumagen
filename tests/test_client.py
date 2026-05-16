@@ -237,10 +237,11 @@ async def test_init_allows_any_stale_timeout_when_polling_disabled(
 async def test_send_command_schedules_refresh_after_control_command(
     fake_transport: FakeTransport,
 ) -> None:
-    """A non-query command should trigger follow-up status queries.
+    """A non-query command should trigger a follow-up status query.
 
-    Without this, button presses take up to one full poll interval
-    (~60s default) to show in HA — exactly the lag the user reported.
+    Catches power-on / standby transitions in HA without waiting for the
+    60s background poll — the only state Full v4 unsolicited reporting
+    can't push.
     """
     c = LumagenClient(
         fake_transport,
@@ -249,27 +250,27 @@ async def test_send_command_schedules_refresh_after_control_command(
         status_poll_interval=10.0,
         stale_timeout=30.0,
     )
-    # Tighten the refresh ticks so the test runs fast.
-    c.REFRESH_TICKS = (0.05, 0.15)
+    # Tighten the refresh tick so the test runs fast.
+    c.REFRESH_TICKS = (0.1,)
     await c.start()
     fake_transport.sent.clear()
 
     # Send a control command (power on).
     await c.power_on()
 
-    # Wait past the second refresh tick.
-    await asyncio.sleep(0.25)
+    # Wait past the tick.
+    await asyncio.sleep(0.2)
     await c.stop()
 
-    # We should see ZQS02 + ZQI24 fired by both refresh ticks.
+    # We should see ZQS02 + ZQI24 fired by the refresh tick.
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
     zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
-    assert zqs02_count >= 2, (
-        f"Expected at least 2 ZQS02 from refresh ticks, got {zqs02_count}: "
+    assert zqs02_count == 1, (
+        f"Expected 1 ZQS02 from refresh tick, got {zqs02_count}: "
         f"{fake_transport.sent}"
     )
-    assert zqi24_count >= 2, (
-        f"Expected at least 2 ZQI24 from refresh ticks, got {zqi24_count}: "
+    assert zqi24_count == 1, (
+        f"Expected 1 ZQI24 from refresh tick, got {zqi24_count}: "
         f"{fake_transport.sent}"
     )
 
