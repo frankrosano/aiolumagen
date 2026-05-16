@@ -232,3 +232,134 @@ async def test_init_allows_any_stale_timeout_when_polling_disabled(
         stale_timeout=2.0,
     )
     assert c is not None
+
+
+async def test_send_command_schedules_refresh_after_control_command(
+    fake_transport: FakeTransport,
+) -> None:
+    """A non-query command should trigger follow-up status queries.
+
+    Without this, button presses take up to one full poll interval
+    (~60s default) to show in HA — exactly the lag the user reported.
+    """
+    c = LumagenClient(
+        fake_transport,
+        # Long poll interval so the regular loop doesn't muddy the test.
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    # Tighten the refresh ticks so the test runs fast.
+    c.REFRESH_TICKS = (0.05, 0.15)
+    await c.start()
+    fake_transport.sent.clear()
+
+    # Send a control command (power on).
+    await c.power_on()
+
+    # Wait past the second refresh tick.
+    await asyncio.sleep(0.25)
+    await c.stop()
+
+    # We should see ZQS02 + ZQI24 fired by both refresh ticks.
+    zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
+    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    assert zqs02_count >= 2, (
+        f"Expected at least 2 ZQS02 from refresh ticks, got {zqs02_count}: "
+        f"{fake_transport.sent}"
+    )
+    assert zqi24_count >= 2, (
+        f"Expected at least 2 ZQI24 from refresh ticks, got {zqi24_count}: "
+        f"{fake_transport.sent}"
+    )
+
+
+async def test_send_command_does_not_refresh_for_query_commands(
+    fake_transport: FakeTransport,
+) -> None:
+    """Query commands (Z-prefixed) must not trigger their own refresh — that
+    would recurse into an unbounded query storm."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    c.REFRESH_TICKS = (0.05, 0.15)
+    await c.start()
+    fake_transport.sent.clear()
+
+    # Sending a query directly should NOT schedule additional follow-ups.
+    await c.query_power()
+
+    await asyncio.sleep(0.25)
+    await c.stop()
+
+    # Only the explicit query should have been sent — no refresh ticks fired.
+    # (We allow exactly 1 ZQS02 from the explicit call.)
+    zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
+    assert zqs02_count == 1, (
+        f"Query command should not auto-refresh, got {zqs02_count} ZQS02s: "
+        f"{fake_transport.sent}"
+    )
+
+
+async def test_refresh_coalesces_overlapping_calls(
+    fake_transport: FakeTransport,
+) -> None:
+    """Bursts of commands should result in one refresh window, not N stacked."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    c.REFRESH_TICKS = (0.1, 0.3)
+    await c.start()
+    fake_transport.sent.clear()
+
+    # Three commands in quick succession (e.g. user rapidly pressing buttons).
+    await c.power_on()
+    await c.standby()
+    await c.send_command("k")  # arbitrary OSD command
+
+    await asyncio.sleep(0.4)  # past second tick
+    await c.stop()
+
+    # Without coalescing we'd see 3 schedules x 2 ticks = 6 of each.
+    # With coalescing we see exactly the most recent schedule's ticks: 2 each.
+    zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
+    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    assert zqs02_count == 2, (
+        f"Expected coalesced refresh = 2 ZQS02s, got {zqs02_count}: "
+        f"{fake_transport.sent}"
+    )
+    assert zqi24_count == 2, (
+        f"Expected coalesced refresh = 2 ZQI24s, got {zqi24_count}: "
+        f"{fake_transport.sent}"
+    )
+
+
+async def test_send_command_refresh_kwarg_can_disable(
+    fake_transport: FakeTransport,
+) -> None:
+    """Callers that want fire-and-forget can opt out via refresh=False."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    c.REFRESH_TICKS = (0.05, 0.15)
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.send_command("%", refresh=False)
+
+    await asyncio.sleep(0.25)
+    await c.stop()
+
+    zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
+    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    assert zqs02_count == 0, f"refresh=False should suppress ticks, got {zqs02_count}"
+    assert zqi24_count == 0, f"refresh=False should suppress ticks, got {zqi24_count}"

@@ -74,6 +74,15 @@ class LumagenClient:
         constructor's ValueError below for details.
     """
 
+    # Delays (seconds, after a control command) at which we re-poll the
+    # Lumagen so listeners see the change quickly without waiting for the
+    # next 60s background poll. Two ticks are enough: the first catches
+    # fast changes (input switch, aspect, memory, OSD nav), the second
+    # catches slow ones (power-on, which can take a few seconds for the
+    # !S02 reply to reflect the new state). Without this, button presses
+    # take up to one full poll interval (~60s) to show in the UI.
+    REFRESH_TICKS: tuple[float, ...] = (0.5, 5.0)
+
     def __init__(
         self,
         transport: _TransportLike,
@@ -107,6 +116,7 @@ class LumagenClient:
         self._async_listeners: list[AsyncStateListener] = []
         self._listener_tasks: set[asyncio.Task[None]] = set()
         self._poll_task: asyncio.Task[None] | None = None
+        self._refresh_task: asyncio.Task[None] | None = None
         self._started = False
         self._last_response_time: float | None = None
         self._available = False
@@ -146,6 +156,11 @@ class LumagenClient:
             with suppress(asyncio.CancelledError):
                 await self._poll_task
             self._poll_task = None
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._refresh_task
+            self._refresh_task = None
         await self._transport.disconnect()
         self._started = False
 
@@ -203,13 +218,21 @@ class LumagenClient:
     # Commands
     # ------------------------------------------------------------------
 
-    async def send_command(self, cmd: str, *, cr: bool = False) -> None:
+    async def send_command(self, cmd: str, *, cr: bool = False, refresh: bool = True) -> None:
         """Send a raw command string.
 
         :param cmd: The command characters (no terminator; one is appended
             if ``cr=True``).
         :param cr: Append a carriage return. Only a handful of Lumagen
             commands need this — consult the RS-232 doc before setting it.
+        :param refresh: If True (default), schedule follow-up status
+            queries so listeners see the result of this command without
+            waiting for the next background poll. Suppressed automatically
+            for query commands (anything starting with ``Z``) so we don't
+            recurse — and also suppressed when no poll loop is running, so
+            unit tests of the raw command path stay clean. Pass
+            ``refresh=False`` for fire-and-forget commands where the
+            caller doesn't care about the new state.
         """
         if not self._started:
             raise LumagenError("LumagenClient.send_command called before start()")
@@ -218,6 +241,14 @@ class LumagenClient:
             payload += b"\r"
         _LOGGER.debug("TX: %s%s", cmd, "<CR>" if cr else "")
         await self._transport.write(payload)
+        # Auto-refresh after control commands. The Z-prefix check skips
+        # query commands (ZQS00, ZQS01, ZQS02, ZQI00, ZQI24, ZE2) so this
+        # method calling itself indirectly through query_*() doesn't
+        # recurse. We also skip when no poll loop is running — in that
+        # configuration the caller has explicitly opted out of background
+        # polling and presumably doesn't want auto-refresh either.
+        if refresh and not cmd.startswith("Z") and self._poll_task is not None:
+            self.request_refresh()
 
     async def power_on(self) -> None:
         await self.send_command("%")
@@ -243,6 +274,28 @@ class LumagenClient:
 
     async def query_full_status(self) -> None:
         await self.send_command(Query.FULL_STATUS.value)
+
+    def request_refresh(self) -> None:
+        """Schedule follow-up status queries so listeners see fresh state soon.
+
+        Fires :meth:`query_power` + :meth:`query_full_status` at each tick
+        in :attr:`REFRESH_TICKS` (default ``(0.5, 5.0)`` seconds). Multiple
+        calls coalesce — an already-running schedule is cancelled and
+        restarted, so a burst of commands produces a single refresh window
+        anchored on the most recent call.
+
+        Called automatically by :meth:`send_command` for non-query commands
+        when a poll loop is running. Manual callers normally don't need
+        this; expose it for the rare case where a consumer manipulates the
+        device through some other path and wants to nudge the state.
+        """
+        if not self._started:
+            return
+        if self._refresh_task is not None and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        self._refresh_task = asyncio.create_task(
+            self._refresh_after_command(), name="pylumagen-refresh"
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -301,6 +354,34 @@ class LumagenClient:
             max_retries,
             max_retries * retry_interval,
         )
+
+    async def _refresh_after_command(self) -> None:
+        """Fire follow-up queries at each REFRESH_TICK delay.
+
+        Runs as a background task spawned by :meth:`request_refresh`. Each
+        tick is an absolute delay from t=0 (when the task started); the
+        loop sleeps the diff between the previous tick and the next so a
+        ``(0.5, 5.0)`` schedule fires at t+0.5s and t+5.0s, not
+        t+0.5s and t+5.5s. Each tick sends ``ZQS02`` (power) +
+        ``ZQI24`` (full status); together they cover every state field
+        the buttons / selects can change. Errors are logged at debug level
+        but don't abort the schedule — a transient transport blip on the
+        first tick shouldn't suppress the second tick's chance to catch
+        the change.
+        """
+        previous = 0.0
+        for tick in self.REFRESH_TICKS:
+            delay = max(0.0, tick - previous)
+            previous = tick
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self.query_power()
+                await self.query_full_status()
+            except LumagenConnectionError as err:
+                _LOGGER.debug("Refresh tick failed (transport down): %s", err)
 
     async def _poll_loop(self) -> None:
         """Poll at the shorter of the two intervals; gate ZQI24 on power.
