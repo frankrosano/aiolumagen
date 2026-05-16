@@ -7,11 +7,12 @@ needs. Implements the startup handshake (``ZE2`` + initial status
 queries) and runs a background poll loop so unsolicited reports aren't
 the only way to stay in sync.
 
-The old ESPHome firmware waited 18 s on boot for the FTDI chip to
-enumerate before sending anything. That protection is optional here
-(see ``startup_delay`` on :class:`LumagenClient`) because in every
-non-cold-boot case the ESP is already enumerated by the time we
-attach. Default is no delay; bump it if you hit reconnect races.
+When attaching to the ESPHome bridge, FTDI re-enumeration is fast — on
+the order of 33 ms from "Open device" to "Baud 9600 set" in the
+firmware's own logs. The startup handshake is built around two short
+retries (2 attempts at 1.5 s apart) rather than a long up-front wait,
+because in steady-state operation the first attempt almost always
+succeeds and the retry only matters during a cold ESP boot.
 """
 
 from __future__ import annotations
@@ -63,24 +64,20 @@ class LumagenClient:
 
     :param transport: Pre-constructed transport. Its data callback will be
         wired during :meth:`start`.
-    :param startup_delay: Seconds to wait after ``transport.connect()``
-        before sending anything. Defaults to 0 (no wait) — the ESP is
-        assumed to be already enumerated by the time a client attaches,
-        which matches every real-world case except a cold boot.
-        If you hit "ZE2 sent before FTDI enumeration finishes" issues
-        after an ESP reboot, bump this (e.g. 18 s was the old firmware's
-        cold-boot value).
     :param power_poll_interval: Seconds between background power polls.
         ``None`` disables polling entirely (pure push mode).
     :param status_poll_interval: Seconds between ``ZQI24`` polls when the
         Lumagen reports power on. ``None`` disables.
+    :param stale_timeout: Seconds without inbound bytes after which the
+        client marks itself unavailable and forces a transport reconnect.
+        Must be greater than the longest poll interval — see the
+        constructor's ValueError below for details.
     """
 
     def __init__(
         self,
         transport: _TransportLike,
         *,
-        startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
         status_poll_interval: float | None = 60.0,
         stale_timeout: float = 90.0,
@@ -102,7 +99,6 @@ class LumagenClient:
                 f"every poll cycle will trip a false-positive reconnect."
             )
         self._transport = transport
-        self._startup_delay = startup_delay
         self._power_poll_interval = power_poll_interval
         self._status_poll_interval = status_poll_interval
         self._stale_timeout = stale_timeout
@@ -134,9 +130,6 @@ class LumagenClient:
         self._transport.set_data_callback(self._on_bytes_received)
         await self._transport.connect()
         self._started = True
-        if self._startup_delay > 0:
-            _LOGGER.debug("Waiting %.1fs for Lumagen warmup", self._startup_delay)
-            await asyncio.sleep(self._startup_delay)
         await self._send_startup_sequence()
         if (
             self._power_poll_interval is not None

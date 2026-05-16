@@ -15,7 +15,6 @@ from tests.conftest import FakeTransport
 async def client(fake_transport: FakeTransport):
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=None,
     )
@@ -90,7 +89,6 @@ async def test_send_command_before_start_raises(
 ) -> None:
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=None,
     )
@@ -103,7 +101,6 @@ async def test_poll_loop_fires_power_query(
 ) -> None:
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=0.05,
         status_poll_interval=None,
     )
@@ -119,7 +116,6 @@ async def test_poll_loop_skips_status_when_powered_off(
 ) -> None:
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=0.05,
     )
@@ -145,7 +141,6 @@ async def test_liveness_tracks_bytes_not_state_changes(
     """
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=None,
         stale_timeout=10.0,
@@ -178,7 +173,6 @@ async def test_available_goes_false_on_true_silence(
     """
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=None,
         stale_timeout=2.0,
@@ -208,7 +202,6 @@ async def test_init_rejects_stale_timeout_below_poll_interval(
     with pytest.raises(ValueError, match="stale_timeout"):
         LumagenClient(
             fake_transport,
-            startup_delay=0.0,
             power_poll_interval=60.0,
             status_poll_interval=60.0,
             stale_timeout=45.0,  # the regressing default from 0.1.0
@@ -221,7 +214,6 @@ async def test_init_allows_stale_timeout_above_poll_interval(
     """Sanity check: a sensible config is accepted."""
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=60.0,
         status_poll_interval=60.0,
         stale_timeout=90.0,
@@ -235,7 +227,6 @@ async def test_init_allows_any_stale_timeout_when_polling_disabled(
     """Without polling, the invariant doesn't apply (no cycle to outrun)."""
     c = LumagenClient(
         fake_transport,
-        startup_delay=0.0,
         power_poll_interval=None,
         status_poll_interval=None,
         stale_timeout=2.0,
