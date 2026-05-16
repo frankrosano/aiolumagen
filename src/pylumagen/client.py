@@ -83,8 +83,24 @@ class LumagenClient:
         startup_delay: float = 0.0,
         power_poll_interval: float | None = 60.0,
         status_poll_interval: float | None = 60.0,
-        stale_timeout: float = 45.0,
+        stale_timeout: float = 90.0,
     ) -> None:
+        # Invariant: stale_timeout MUST be greater than the poll interval.
+        # The poll loop checks staleness immediately after sending a query,
+        # before the device's response can arrive — if the timeout is shorter
+        # than one poll cycle, every cycle's elapsed-since-last-response will
+        # exceed it and trigger a false-positive reconnect. (Bug observed in
+        # 0.1.0 with stale_timeout=45s vs. 60s polls: warnings every 60s in
+        # steady state.)
+        poll_intervals = [
+            iv for iv in (power_poll_interval, status_poll_interval) if iv is not None
+        ]
+        if poll_intervals and stale_timeout <= max(poll_intervals):
+            raise ValueError(
+                f"stale_timeout ({stale_timeout}s) must be greater than the "
+                f"longest poll interval ({max(poll_intervals)}s); otherwise "
+                f"every poll cycle will trip a false-positive reconnect."
+            )
         self._transport = transport
         self._startup_delay = startup_delay
         self._power_poll_interval = power_poll_interval
@@ -154,8 +170,12 @@ class LumagenClient:
         """True when the Lumagen is actively responding.
 
         Becomes True on the first inbound bytes, reverts to False if no
-        bytes have arrived within ``stale_timeout`` seconds (default 45s,
-        roughly three quarters of one poll cycle). Tracks raw bytes
+        bytes have arrived within ``stale_timeout`` seconds (default 90s).
+        The timeout must be longer than the longest poll interval so a
+        normal poll cycle has time to write the query, await the response,
+        and update ``_last_response_time`` before the next staleness check
+        runs. With the default 60s polls, 90s gives one full cycle of slack
+        plus another 30s for transient network delays. Tracks raw bytes
         rather than state changes so a steady-state Lumagen (polls
         succeeding but returning identical data) still counts as alive.
         """

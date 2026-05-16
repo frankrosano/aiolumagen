@@ -191,3 +191,53 @@ async def test_available_goes_false_on_true_silence(
     assert c.available is False
 
     await c.stop()
+
+
+async def test_init_rejects_stale_timeout_below_poll_interval(
+    fake_transport: FakeTransport,
+) -> None:
+    """The constructor enforces stale_timeout > longest poll interval.
+
+    Regression for the 0.1.0 bug: stale_timeout=45s with 60s polls fired
+    "no response in 45s" warnings every poll cycle even though responses
+    were arriving. Root cause: the poll loop checks staleness immediately
+    after sending each query, before the device's response can arrive —
+    so a too-tight timeout makes elapsed-since-last-response always
+    exceed it. Enforced at construction time so this can't regress.
+    """
+    with pytest.raises(ValueError, match="stale_timeout"):
+        LumagenClient(
+            fake_transport,
+            startup_delay=0.0,
+            power_poll_interval=60.0,
+            status_poll_interval=60.0,
+            stale_timeout=45.0,  # the regressing default from 0.1.0
+        )
+
+
+async def test_init_allows_stale_timeout_above_poll_interval(
+    fake_transport: FakeTransport,
+) -> None:
+    """Sanity check: a sensible config is accepted."""
+    c = LumagenClient(
+        fake_transport,
+        startup_delay=0.0,
+        power_poll_interval=60.0,
+        status_poll_interval=60.0,
+        stale_timeout=90.0,
+    )
+    assert c is not None
+
+
+async def test_init_allows_any_stale_timeout_when_polling_disabled(
+    fake_transport: FakeTransport,
+) -> None:
+    """Without polling, the invariant doesn't apply (no cycle to outrun)."""
+    c = LumagenClient(
+        fake_transport,
+        startup_delay=0.0,
+        power_poll_interval=None,
+        status_poll_interval=None,
+        stale_timeout=2.0,
+    )
+    assert c is not None
