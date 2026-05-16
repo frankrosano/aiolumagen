@@ -269,3 +269,48 @@ def test_i25_truncated_payload_is_safe() -> None:
     # Trailing v5 fields not present — should remain at their priors.
     assert state.input_memory is None
     assert state.power_on is None
+
+
+# ---------- Sharpness / Game mode / Auto aspect (Phase 1 expansions) ----------
+
+
+def test_i30_sharpness_payload_decoded() -> None:
+    """!I30 = ``Y4N`` → enabled=True, level=4, sensitivity=NORMAL."""
+    from pylumagen.state import SharpnessSensitivity
+
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I30,Y4N\r\n")
+    state, codes = updates[-1]
+    assert codes == ("I30",)
+    assert state.sharpness_enabled is True
+    assert state.sharpness_level == 4
+    assert state.sharpness_sensitivity is SharpnessSensitivity.NORMAL
+    assert state.sharpness_raw == "Y4N"
+
+
+def test_i30_sharpness_disabled() -> None:
+    """!I30 = ``N0H`` → enabled=False, level=0, sensitivity=HIGH."""
+    from pylumagen.state import SharpnessSensitivity
+
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I30,N0H\r\n")
+    state, _ = updates[-1]
+    assert state.sharpness_enabled is False
+    assert state.sharpness_level == 0
+    assert state.sharpness_sensitivity is SharpnessSensitivity.HIGH
+
+
+def test_i53_game_mode_on_off() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I53,1\r\n")
+    assert updates[-1][0].game_mode is True
+    proto.feed_bytes(b"!I53,0\r\n")
+    assert updates[-1][0].game_mode is False
+
+
+def test_i54_auto_aspect_on_off() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I54,1\r\n")
+    assert updates[-1][0].auto_aspect is True
+    proto.feed_bytes(b"!I54,0\r\n")
+    assert updates[-1][0].auto_aspect is False

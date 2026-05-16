@@ -400,3 +400,171 @@ async def test_default_refresh_ticks_is_empty_no_post_command_polling(
     # Only the three control commands themselves should appear; no extra
     # ZQS02 / ZQI25 from a refresh task.
     assert fake_transport.sent == [b"%", b"$", b"k"]
+
+
+# ---------- Phase 1 setter tests (sharpness / game mode / fan / subtitle / auto aspect) ----------
+
+
+async def test_set_sharpness_writes_command_with_cr_then_queries(
+    fake_transport: FakeTransport,
+) -> None:
+    """set_sharpness writes ZY521ELS<CR> followed by a ZQI30 refresh."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_sharpness(enabled=True, level=4, sensitivity="N")
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY521Y4N\r", b"ZQI30"]
+
+
+async def test_set_sharpness_validates_inputs(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    with pytest.raises(ValueError, match="0-7"):
+        await c.set_sharpness(enabled=True, level=99)
+    with pytest.raises(ValueError, match="'H' or 'N'"):
+        await c.set_sharpness(enabled=True, level=2, sensitivity="X")
+
+    # Neither bad call should have written anything.
+    assert fake_transport.sent == []
+    await c.stop()
+
+
+async def test_set_game_mode_writes_with_cr_then_queries(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_game_mode(True)
+    await c.set_game_mode(False)
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY5511\r", b"ZQI53", b"ZY5510\r", b"ZQI53"]
+
+
+async def test_set_fan_speed_writes_with_cr(
+    fake_transport: FakeTransport,
+) -> None:
+    """fan speed has no documented query, so we only write."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_fan_speed(3)
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY5523\r"]
+
+
+async def test_set_fan_speed_validates_range(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    with pytest.raises(ValueError, match="0-9"):
+        await c.set_fan_speed(10)
+    await c.stop()
+
+
+async def test_set_subtitle_shift_writes_with_cr(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_subtitle_shift(2)
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY5532\r"]
+
+
+async def test_set_subtitle_shift_validates(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    with pytest.raises(ValueError, match="0, 1, or 2"):
+        await c.set_subtitle_shift(3)
+    await c.stop()
+
+
+async def test_reset_auto_aspect_writes_with_cr_then_queries(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.reset_auto_aspect()
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY550\r", b"ZQI54"]
+
+
+async def test_query_methods_dispatch_correct_strings(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.query_sharpness()
+    await c.query_game_mode()
+    await c.query_auto_aspect()
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZQI30", b"ZQI53", b"ZQI54"]

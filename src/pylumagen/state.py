@@ -53,6 +53,17 @@ class SourceMode(StrEnum):
     NO_INPUT_V5 = "n"
 
 
+class SharpnessSensitivity(StrEnum):
+    """Sharpness sensitivity reported in the ``!I30`` / ``ZY521ELS`` S field.
+
+    ``H`` — high (more aggressive edge detection)
+    ``N`` — normal
+    """
+
+    HIGH = "H"
+    NORMAL = "N"
+
+
 @dataclass(slots=True)
 class LumagenState:
     """Snapshot of a Lumagen's reported state.
@@ -99,6 +110,19 @@ class LumagenState:
 
     # --- Output mode (from !O01) ---
     output_mode_raw: str | None = None
+
+    # --- Sharpness (from !I30 / ZY521ELS) ---
+    sharpness_enabled: bool | None = None
+    sharpness_level: int | None = None  # 0-7
+    sharpness_sensitivity: SharpnessSensitivity | None = None
+    sharpness_raw: str | None = None
+    """Raw payload of the most recent !I30 — kept for diagnostic dumps."""
+
+    # --- Game mode (from !I53 / ZY551) ---
+    game_mode: bool | None = None
+
+    # --- Auto aspect (from !I54) ---
+    auto_aspect: bool | None = None
 
     # --- Bookkeeping ---
     last_update_codes: tuple[str, ...] = field(default_factory=tuple)

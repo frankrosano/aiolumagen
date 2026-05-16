@@ -23,7 +23,16 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Protocol
 
-from pylumagen.commands import ECHO_OFF_WITH_STATUS, Query, input_command
+from pylumagen.commands import (
+    ECHO_OFF_WITH_STATUS,
+    Query,
+    fan_speed_command,
+    game_mode_command,
+    input_command,
+    reset_auto_aspect_command,
+    sharpness_command,
+    subtitle_shift_command,
+)
 from pylumagen.exceptions import LumagenConnectionError, LumagenError
 from pylumagen.protocol import LumagenProtocol
 from pylumagen.state import LumagenState
@@ -291,6 +300,68 @@ class LumagenClient:
     async def query_full_status_v4(self) -> None:
         """Send ``ZQI24`` (Full v4) for older firmwares that don't know v5."""
         await self.send_command(Query.FULL_STATUS.value)
+
+    async def query_sharpness(self) -> None:
+        """Send ``ZQI30`` and update :attr:`state.sharpness_*`."""
+        await self.send_command(Query.SHARPNESS.value)
+
+    async def query_game_mode(self) -> None:
+        """Send ``ZQI53`` and update :attr:`state.game_mode`."""
+        await self.send_command(Query.GAME_MODE.value)
+
+    async def query_auto_aspect(self) -> None:
+        """Send ``ZQI54`` and update :attr:`state.auto_aspect`."""
+        await self.send_command(Query.AUTO_ASPECT.value)
+
+    async def set_sharpness(
+        self,
+        *,
+        enabled: bool,
+        level: int,
+        sensitivity: str = "N",
+    ) -> None:
+        """Set sharpness via ``ZY521ELS`` and re-query so state catches up.
+
+        Sharpness is not part of the Full v5 push stream, so a follow-up
+        ``ZQI30`` is needed to refresh ``state.sharpness_*`` after the
+        write. We issue both back-to-back.
+        """
+        await self.send_command(sharpness_command(
+            enabled=enabled, level=level, sensitivity=sensitivity,
+        ), cr=True, refresh=False)
+        await self.query_sharpness()
+
+    async def set_game_mode(self, enabled: bool) -> None:
+        """Set game mode via ``ZY551X`` and re-query ``ZQI53``."""
+        await self.send_command(game_mode_command(enabled), cr=True, refresh=False)
+        await self.query_game_mode()
+
+    async def set_fan_speed(self, level: int) -> None:
+        """Set minimum fan speed via ``ZY552X`` (0-9; higher = faster).
+
+        Reverse-engineered from the firmware (see
+        ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md``); not
+        documented in the bundled Tip0011 PDF. There is no documented
+        query for the current fan speed, so this method only writes —
+        ``state`` won't reflect the new value.
+        """
+        await self.send_command(fan_speed_command(level), cr=True, refresh=False)
+
+    async def set_subtitle_shift(self, level: int) -> None:
+        """Set subtitle shifting via ``ZY553X`` (0/1/2).
+
+        Reverse-engineered from the firmware; not documented in the
+        bundled Tip0011 PDF. Write-only — no documented query.
+        """
+        await self.send_command(subtitle_shift_command(level), cr=True, refresh=False)
+
+    async def reset_auto_aspect(self) -> None:
+        """``ZY550`` — reset and reinitiate automatic aspect detection.
+
+        Re-queries ``ZQI54`` after to pick up any state change.
+        """
+        await self.send_command(reset_auto_aspect_command(), cr=True, refresh=False)
+        await self.query_auto_aspect()
 
     def request_refresh(self) -> None:
         """Schedule follow-up status queries on the :attr:`REFRESH_TICKS` schedule.

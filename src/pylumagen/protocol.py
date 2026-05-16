@@ -42,6 +42,7 @@ from pylumagen.state import (
     HdrStatus,
     InputStatus,
     LumagenState,
+    SharpnessSensitivity,
     SourceMode,
 )
 
@@ -197,6 +198,12 @@ class LumagenProtocol:
         elif code in ("I21", "I22", "I23"):
             pending.full_status_raw = data
             self._apply_i2x(data, pending)
+        elif code == "I30":
+            self._handle_i30(data, pending)
+        elif code == "I53":
+            pending.game_mode = data[:1] == "1"
+        elif code == "I54":
+            pending.auto_aspect = data[:1] == "1"
         elif code == "O01":
             pending.output_mode_raw = data
         else:
@@ -248,6 +255,27 @@ class LumagenProtocol:
             state.current_input = parts[0]
         if len(parts) >= 2:
             state.input_memory = parts[1]
+
+    @staticmethod
+    def _handle_i30(data: str, state: LumagenState) -> None:
+        """!I30 = sharpness setting, format ``<E><L><S>`` matching ZY521ELS.
+
+        E = ``Y``/``N`` (enabled), L = ``0``-``7`` (level), S = ``H``/``N``
+        (sensitivity). The Lumagen doc (Tip0011, ``ZQI30``) describes the
+        response only as "Returns values corresponding to the YZ521ELS
+        command" — no published example payload, so this implementation
+        is best-effort. Always stash the raw payload so a diagnostic dump
+        can show the wire bytes if the structured fields look wrong.
+        """
+        state.sharpness_raw = data
+        if len(data) >= 1 and data[0] in ("Y", "N"):
+            state.sharpness_enabled = data[0] == "Y"
+        if len(data) >= 2 and data[1].isdigit():
+            level = int(data[1])
+            if 0 <= level <= 7:
+                state.sharpness_level = level
+        if len(data) >= 3 and data[2] in ("H", "N"):
+            state.sharpness_sensitivity = SharpnessSensitivity(data[2])
 
     @staticmethod
     def _apply_i24(data: str, state: LumagenState) -> None:
