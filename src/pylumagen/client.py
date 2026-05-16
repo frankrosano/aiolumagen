@@ -66,7 +66,7 @@ class LumagenClient:
         wired during :meth:`start`.
     :param power_poll_interval: Seconds between background power polls.
         ``None`` disables polling entirely (pure push mode).
-    :param status_poll_interval: Seconds between ``ZQI24`` polls when the
+    :param status_poll_interval: Seconds between ``ZQI25`` polls when the
         Lumagen reports power on. ``None`` disables.
     :param stale_timeout: Seconds without inbound bytes after which the
         client marks itself unavailable and forces a transport reconnect.
@@ -75,17 +75,15 @@ class LumagenClient:
     """
 
     # Delay (seconds, after a control command) at which we re-poll the
-    # Lumagen so listeners see power-state changes without waiting for the
-    # next 60s background poll. Power transitions are the only state the
-    # Lumagen can't push via "Full v4" unsolicited reporting — the device
-    # doesn't emit !I24 while in standby, and the on/off transition takes
-    # a few seconds to settle. For everything else (input switch, aspect,
-    # memory, OSD nav) Full v4 reports the change in real time, so a fast
-    # tick would just be redundant. Users who haven't enabled Full v4 fall
-    # back to the 60s background poll for non-power changes; the
-    # integration's iot_class is "local_push" so Full v4 is the
-    # documented happy path.
-    REFRESH_TICKS: tuple[float, ...] = (5.0,)
+    # Lumagen as a backstop. With "Full v5" reporting enabled (the
+    # documented happy path — Tip0011, Report mode changes -> Full v5)
+    # the device pushes !I25 on every state change INCLUDING power
+    # transitions, so this tick is purely a safety net for users still
+    # on Full v4 or older, where power on/off can lag a poll cycle.
+    # Empty by default since the recommended setup doesn't need it; the
+    # tick mechanism stays in place so future Lumagen quirks can re-arm
+    # it without code changes.
+    REFRESH_TICKS: tuple[float, ...] = ()
 
     def __init__(
         self,
@@ -229,15 +227,17 @@ class LumagenClient:
             if ``cr=True``).
         :param cr: Append a carriage return. Only a handful of Lumagen
             commands need this — consult the RS-232 doc before setting it.
-        :param refresh: If True (default), schedule a follow-up status
-            query 5 s after this command so power-on / standby transitions
-            (which the Lumagen cannot push via Full v4) reach listeners
-            without a 60 s poll wait. Suppressed automatically for query
-            commands (anything starting with ``Z``) so we don't recurse —
-            and also suppressed when no poll loop is running, so unit
-            tests of the raw command path stay clean. Pass
-            ``refresh=False`` for fire-and-forget commands where the
-            caller doesn't care about the new state.
+        :param refresh: If True (default), call :meth:`request_refresh`
+            after writing the command. With Full v5 enabled (the
+            documented setup) this is a cheap no-op because
+            :attr:`REFRESH_TICKS` is empty by default — the device pushes
+            !I25 on every state change including power. Older firmwares
+            without v5 can override REFRESH_TICKS to e.g. ``(5.0,)`` to
+            re-arm the post-command refresh; see the class attribute's
+            docstring for context. Suppressed automatically for query
+            commands (anything starting with ``Z``) so we don't recurse,
+            and when no poll loop is running. Pass ``refresh=False`` to
+            unconditionally suppress.
         """
         if not self._started:
             raise LumagenError("LumagenClient.send_command called before start()")
@@ -247,7 +247,7 @@ class LumagenClient:
         _LOGGER.debug("TX: %s%s", cmd, "<CR>" if cr else "")
         await self._transport.write(payload)
         # Auto-refresh after control commands. The Z-prefix check skips
-        # query commands (ZQS00, ZQS01, ZQS02, ZQI00, ZQI24, ZE2) so this
+        # query commands (ZQS00, ZQS01, ZQS02, ZQI00, ZQI25, ZE2) so this
         # method calling itself indirectly through query_*() doesn't
         # recurse. We also skip when no poll loop is running — in that
         # configuration the caller has explicitly opted out of background
@@ -278,29 +278,43 @@ class LumagenClient:
         await self.send_command(Query.INPUT_INFO.value)
 
     async def query_full_status(self) -> None:
+        """Send ``ZQI25`` (Full v5).
+
+        The device responds with ``!I25,…`` regardless of whether
+        unsolicited reporting is set to v4 or v5 — older queries and
+        newer queries are independent. Calling this against a firmware
+        that predates v5 will silently get nothing back; in that case use
+        :meth:`query_full_status_v4` instead.
+        """
+        await self.send_command(Query.FULL_STATUS_V5.value)
+
+    async def query_full_status_v4(self) -> None:
+        """Send ``ZQI24`` (Full v4) for older firmwares that don't know v5."""
         await self.send_command(Query.FULL_STATUS.value)
 
     def request_refresh(self) -> None:
-        """Schedule a follow-up status query for power-transition coverage.
+        """Schedule follow-up status queries on the :attr:`REFRESH_TICKS` schedule.
 
-        Fires :meth:`query_power` + :meth:`query_full_status` at each tick
-        in :attr:`REFRESH_TICKS` (default ``(5.0,)``). The single 5 s tick
-        catches power-on/standby transitions, which the Lumagen cannot
-        push via "Full v4" unsolicited reporting (no !I24 emitted while in
-        standby; on/off transition takes a few seconds to settle on the
-        device side). Other state changes — input, aspect, memory, OSD —
-        flow through Full v4 in real time and don't need a tick.
+        With Full v5 reporting enabled (the documented happy path), this
+        is effectively a no-op: ``REFRESH_TICKS`` defaults to ``()`` and
+        every state change — including power — pushes via ``!I25`` in
+        real time. The mechanism stays in place as a safety net for
+        firmwares without v5 (where ``REFRESH_TICKS`` can be set to e.g.
+        ``(5.0,)`` to catch power transitions) and for future Lumagen
+        quirks that may want it.
 
-        Multiple calls coalesce: an in-flight schedule is cancelled and
-        restarted, so a burst of commands produces one window anchored on
-        the most recent press, not N stacked.
+        When ticks are configured, multiple calls coalesce: an in-flight
+        schedule is cancelled and restarted, so a burst of commands
+        produces one window anchored on the most recent press.
 
-        Called automatically by :meth:`send_command` for non-query commands
-        when a poll loop is running. Manual callers normally don't need
-        this; expose it for the rare case where a consumer manipulates the
-        device through some other path and wants to nudge the state.
+        Called automatically by :meth:`send_command` for non-query
+        commands when a poll loop is running.
         """
         if not self._started:
+            return
+        if not self.REFRESH_TICKS:
+            # Empty schedule — nothing to do. Skip the task spawn entirely
+            # so we don't churn through cancel/spawn cycles on every press.
             return
         if self._refresh_task is not None and not self._refresh_task.done():
             self._refresh_task.cancel()
@@ -371,13 +385,12 @@ class LumagenClient:
 
         Runs as a background task spawned by :meth:`request_refresh`. Each
         tick is an absolute delay from t=0 (when the task started); the
-        loop sleeps the diff between the previous tick and the next so a
-        ``(5.0,)`` schedule fires once at t+5 s. Each tick sends ``ZQS02``
-        (power) + ``ZQI24`` (full status); together they cover every state
-        field the buttons / selects can change, which keeps the schedule
-        flexible if more ticks are ever added. Errors are logged at debug
-        level but don't abort the schedule — a transient transport blip on
-        one tick shouldn't suppress remaining ticks.
+        loop sleeps the diff between the previous tick and the next. Each
+        tick sends ``ZQS02`` (power) + ``ZQI25`` (full v5 status); these
+        cover every state field the buttons / selects can change. Errors
+        are logged at debug level but don't abort the schedule — a
+        transient transport blip on one tick shouldn't suppress remaining
+        ticks.
         """
         previous = 0.0
         for tick in self.REFRESH_TICKS:
@@ -394,7 +407,7 @@ class LumagenClient:
                 _LOGGER.debug("Refresh tick failed (transport down): %s", err)
 
     async def _poll_loop(self) -> None:
-        """Poll at the shorter of the two intervals; gate ZQI24 on power.
+        """Poll at the shorter of the two intervals; gate ZQI25 on power.
 
         Also checks for staleness. If no response arrives within
         ``stale_timeout`` we:

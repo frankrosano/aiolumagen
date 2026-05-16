@@ -57,16 +57,16 @@ The **protocol** is pure sync code — no I/O, easy to test with recorded bytes.
 
 Fields remain `None` until the corresponding response has been seen at least once — the Lumagen sends partial updates and the library merges them into one authoritative state snapshot.
 
-## Lumagen-side prerequisite: enabling "Full v4" unsolicited reporting
+## Lumagen-side prerequisite: enabling unsolicited reporting
 
-For real-time status pushes (rather than just 60 s polling), configure the Lumagen to emit `!I24` reports when state changes:
+For real-time status pushes (rather than just 60 s polling), configure the Lumagen to emit reports when state changes. **Full v5** is recommended on current firmware — it pushes power transitions and memory swaps in addition to v4's coverage, so HA entities update without any post-command polling:
 
 1. On the Lumagen remote or OSD, press `MENU`.
 2. Navigate: **Other → I/O Setup → RS-232 Setup → Report mode changes**.
-3. Cycle to **Full v4**.
+3. Cycle to **Full v5** (or **Full v4** on older firmware).
 4. Press `OK` to confirm, then `SAVE` to persist.
 
-This writes to the Lumagen's NVRAM and persists across reboots. Without this, the library still works — it just relies on its polling loop to catch state changes.
+This writes to the Lumagen's NVRAM and persists across reboots. Without it, the library still works — it just relies on its 60 s polling loop to catch state changes.
 
 ## Exception mapping (for Home Assistant integrators)
 

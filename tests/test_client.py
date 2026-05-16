@@ -26,13 +26,13 @@ async def test_start_connects_and_sends_startup_sequence(
     fake_transport: FakeTransport, client: LumagenClient
 ) -> None:
     await client.start()
-    # Startup sequence: ZE2, then ZQS01, ZQS02, ZQI00, ZQI24.
+    # Startup sequence: ZE2, then ZQS01, ZQS02, ZQI00, ZQI25.
     sent = b"".join(fake_transport.sent)
     assert b"ZE2" in sent
     assert b"ZQS01" in sent
     assert b"ZQS02" in sent
     assert b"ZQI00" in sent
-    assert b"ZQI24" in sent
+    assert b"ZQI25" in sent
 
 
 async def test_inbound_bytes_update_state(
@@ -120,11 +120,11 @@ async def test_poll_loop_skips_status_when_powered_off(
         status_poll_interval=0.05,
     )
     await c.start()
-    # power_on is None (unknown) → ZQI24 is gated off
+    # power_on is None (unknown) → ZQI25 is gated off
     fake_transport.sent.clear()
     await asyncio.sleep(0.12)
     await c.stop()
-    assert all(b"ZQI24" not in chunk for chunk in fake_transport.sent)
+    assert all(b"ZQI25" not in chunk for chunk in fake_transport.sent)
 
 
 async def test_liveness_tracks_bytes_not_state_changes(
@@ -237,11 +237,13 @@ async def test_init_allows_any_stale_timeout_when_polling_disabled(
 async def test_send_command_schedules_refresh_after_control_command(
     fake_transport: FakeTransport,
 ) -> None:
-    """A non-query command should trigger a follow-up status query.
+    """A non-query command should trigger follow-up status queries when
+    REFRESH_TICKS is non-empty.
 
-    Catches power-on / standby transitions in HA without waiting for the
-    60s background poll — the only state Full v4 unsolicited reporting
-    can't push.
+    With Full v5 enabled REFRESH_TICKS defaults to ``()`` (the device
+    pushes everything in real time), but the mechanism is still
+    available for older firmwares — this test pins down its
+    behavior with an explicit override.
     """
     c = LumagenClient(
         fake_transport,
@@ -262,15 +264,15 @@ async def test_send_command_schedules_refresh_after_control_command(
     await asyncio.sleep(0.2)
     await c.stop()
 
-    # We should see ZQS02 + ZQI24 fired by the refresh tick.
+    # We should see ZQS02 + ZQI25 fired by the refresh tick.
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
-    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    zqi25_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI25")
     assert zqs02_count == 1, (
         f"Expected 1 ZQS02 from refresh tick, got {zqs02_count}: "
         f"{fake_transport.sent}"
     )
-    assert zqi24_count == 1, (
-        f"Expected 1 ZQI24 from refresh tick, got {zqi24_count}: "
+    assert zqi25_count == 1, (
+        f"Expected 1 ZQI25 from refresh tick, got {zqi25_count}: "
         f"{fake_transport.sent}"
     )
 
@@ -330,13 +332,13 @@ async def test_refresh_coalesces_overlapping_calls(
     # Without coalescing we'd see 3 schedules x 2 ticks = 6 of each.
     # With coalescing we see exactly the most recent schedule's ticks: 2 each.
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
-    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    zqi25_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI25")
     assert zqs02_count == 2, (
         f"Expected coalesced refresh = 2 ZQS02s, got {zqs02_count}: "
         f"{fake_transport.sent}"
     )
-    assert zqi24_count == 2, (
-        f"Expected coalesced refresh = 2 ZQI24s, got {zqi24_count}: "
+    assert zqi25_count == 2, (
+        f"Expected coalesced refresh = 2 ZQI25s, got {zqi25_count}: "
         f"{fake_transport.sent}"
     )
 
@@ -361,6 +363,40 @@ async def test_send_command_refresh_kwarg_can_disable(
     await c.stop()
 
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
-    zqi24_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI24")
+    zqi25_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI25")
     assert zqs02_count == 0, f"refresh=False should suppress ticks, got {zqs02_count}"
-    assert zqi24_count == 0, f"refresh=False should suppress ticks, got {zqi24_count}"
+    assert zqi25_count == 0, f"refresh=False should suppress ticks, got {zqi25_count}"
+
+
+async def test_default_refresh_ticks_is_empty_no_post_command_polling(
+    fake_transport: FakeTransport,
+) -> None:
+    """The shipped default (Full v5 happy path) issues no follow-up polls.
+
+    Regression for the v5 cleanup: REFRESH_TICKS used to be (5.0,) to
+    catch power transitions Full v4 couldn't push. With Full v5 the
+    device pushes everything via !I25, so no extra polls are needed —
+    REFRESH_TICKS defaults to () and request_refresh is a no-op.
+    """
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    # Don't override REFRESH_TICKS — we want the production default.
+    assert c.REFRESH_TICKS == ()
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.power_on()
+    await c.standby()
+    await c.send_command("k")
+
+    # Wait long enough that any vestigial 5s tick would have fired.
+    await asyncio.sleep(0.2)
+    await c.stop()
+
+    # Only the three control commands themselves should appear; no extra
+    # ZQS02 / ZQI25 from a refresh task.
+    assert fake_transport.sent == [b"%", b"$", b"k"]

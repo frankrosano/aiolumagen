@@ -92,10 +92,13 @@ class Query(StrEnum):
     INPUT_INFO = "ZQI00"
     INPUT_VIDEO = "ZQI01"
     FULL_STATUS = "ZQI24"
+    FULL_STATUS_V5 = "ZQI25"
 
 
 # Echo mode — sent once at startup to reduce command echoing and enable
-# "Full v4" unsolicited status reports. See the Lumagen RS-232 doc.
+# the Lumagen's "Full v4"/"Full v5" unsolicited status reports (the report
+# format is set separately via the device's menu; this just turns on the
+# echo-off mode that keeps responses clean). See the Lumagen RS-232 doc.
 ECHO_OFF_WITH_STATUS = "ZE2"
 
 

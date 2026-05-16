@@ -176,3 +176,96 @@ def test_reset_discards_partial_line() -> None:
     proto.feed_bytes(b"1\r\n")
     # After reset, the remainder "1\r\n" has no ! and is ignored.
     assert updates == []
+
+
+def test_i25_full_status_populates_v4_fields_plus_memory_and_power() -> None:
+    """!I25 = v4 layout + 2 trailing fields (memory letter, power state).
+
+    Payload taken from a real Full v5 capture against firmware 030225 in
+    May 2026: input 1 active, 4K SDR source, output to 4K progressive.
+    """
+    updates, proto = _collect()
+    line = (
+        "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
+    )
+    proto.feed_bytes(line.encode("ascii"))
+    state, codes = updates[-1]
+    assert codes == ("I25",)
+    # v4-shared fields
+    assert state.input_status is InputStatus.ACTIVE
+    assert state.source_vrate == "059"
+    assert state.source_resolution == "2160"
+    assert state.source_aspect == "178"
+    assert state.content_aspect == "178"
+    assert state.output_vrate == "059"
+    assert state.output_resolution == "2160"
+    assert state.colorspace is Colorspace.REC_2020  # E=2
+    assert state.is_hdr is False  # F=0
+    assert state.source_mode is SourceMode.PROGRESSIVE
+    assert state.current_input == "01"  # II
+    # v5-only fields
+    assert state.input_memory == "A"
+    assert state.power_on is True
+
+
+def test_i25_power_off_reports_power_zero() -> None:
+    """A real "after standby" capture — last field is 0."""
+    updates, proto = _collect()
+    line = (
+        "!I25,0,059,0000,0,0,178,178,-,0,000f,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,0\r\n"
+    )
+    proto.feed_bytes(line.encode("ascii"))
+    state, _ = updates[-1]
+    assert state.power_on is False
+    # Memory letter still flows through even when powered off.
+    assert state.input_memory == "A"
+
+
+def test_i25_n_source_mode_recognized() -> None:
+    """v5 firmware emits ``n`` for "no input"; older firmware used ``-``.
+
+    Both must populate ``state.source_mode`` (no ValueError, no silent
+    drop). The enum exposes them as distinct members so a consumer that
+    cares about the wire byte can still see it, but most consumers will
+    compare against either one.
+    """
+    updates, proto = _collect()
+    line = (
+        "!I25,0,059,0000,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,1\r\n"
+    )
+    proto.feed_bytes(line.encode("ascii"))
+    state, _ = updates[-1]
+    assert state.source_mode is SourceMode.NO_INPUT_V5
+    assert state.source_mode == "n"
+
+
+def test_i25_input_switch_updates_virtual_input_and_keeps_v5_fields() -> None:
+    """Successive !I25s with different II values: v5 fields stay at fixed indices."""
+    updates, proto = _collect()
+    proto.feed_bytes(
+        b"!I25,0,059,0000,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,n,P,03,03,178,178,A,1\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.current_input == "03"
+    assert state.input_memory == "A"
+    assert state.power_on is True
+
+    proto.feed_bytes(
+        b"!I25,0,059,0000,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,n,P,01,01,178,178,B,1\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.current_input == "01"
+    assert state.input_memory == "B"  # tracked across the move
+    assert state.power_on is True
+
+
+def test_i25_truncated_payload_is_safe() -> None:
+    """Partial !I25 (e.g. only the v4-shared prefix) doesn't crash the parser."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I25,1,060,1080,0,0,178,178,0,0,1920,0,0,060,1080\r\n")
+    state, _ = updates[-1]
+    assert state.input_status is InputStatus.ACTIVE
+    assert state.source_resolution == "1080"
+    # Trailing v5 fields not present — should remain at their priors.
+    assert state.input_memory is None
+    assert state.power_on is None

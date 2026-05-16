@@ -16,8 +16,19 @@ Key invariants (from the old C++ comments, confirmed against captures):
 * Some lines arrive without a final newline before the next line's prefix
   (rare; happens when the Lumagen coalesces unsolicited reports). We don't
   try to handle that — we trust the boundary is a newline.
-* Known response codes: S00, S01, S02, I00, I01, I21, I22, I23, I24, O01.
-  Unknown codes are logged at DEBUG and ignored.
+* Known response codes: S00, S01, S02, I00, I01, I21, I22, I23, I24, I25,
+  O01. Unknown codes are logged at DEBUG and ignored.
+
+Full v5 (``ZQI25`` / ``!I25``) is the recommended unsolicited-reporting
+mode for current Lumagen firmware. It extends the v4 layout with two new
+fields at the end:
+
+* index 23 — active input memory letter (``A``/``B``/``C``/``D``)
+* index 24 — power state (``0``/``1``)
+
+These were previously only obtainable via separate ``ZQI00`` and ``ZQS02``
+queries; v5 pushes them on every state change so power transitions and
+memory swaps reach listeners in real time without a follow-up poll.
 """
 
 from __future__ import annotations
@@ -56,8 +67,12 @@ _I24_OUTPUT_VRATE = 12  # PPP
 _I24_OUTPUT_RESOLUTION = 13  # QQQQ
 _I24_COLORSPACE = 15  # E: 0=601, 1=709, 2=2020, 3=2100
 _I24_HDR_FLAG = 16  # F: 0=SDR, 1=HDR
-_I24_SOURCE_MODE = 17  # G: i, p, -
+_I24_SOURCE_MODE = 17  # G: i, p, -, n
 _I24_VIRTUAL_INPUT = 19  # II: 1-19
+
+# I25-only fields appended to the v4 layout (see module docstring).
+_I25_INPUT_MEMORY = 23  # A/B/C/D
+_I25_POWER_STATE = 24  # 0=off, 1=on
 
 _INPUT_STATUS_MAP = {
     "0": InputStatus.NO_SOURCE,
@@ -176,6 +191,9 @@ class LumagenProtocol:
         elif code == "I24":
             pending.full_status_raw = data
             self._apply_i24(data, pending)
+        elif code == "I25":
+            pending.full_status_raw = data
+            self._apply_i25(data, pending)
         elif code in ("I21", "I22", "I23"):
             pending.full_status_raw = data
             self._apply_i2x(data, pending)
@@ -254,6 +272,27 @@ class LumagenProtocol:
                 _LOGGER.debug("Unknown source mode %r", raw)
         if len(fields) > _I24_VIRTUAL_INPUT:
             state.current_input = fields[_I24_VIRTUAL_INPUT]
+
+    @staticmethod
+    def _apply_i25(data: str, state: LumagenState) -> None:
+        """!I25 = Full v5 status, v4 layout + 2 trailing fields.
+
+        Reuses :meth:`_apply_i24` for the 23 v4-shared fields, then pulls
+        the v5 additions: active input memory letter (idx 23) and power
+        state (idx 24). With v5 enabled on the device, power transitions
+        and memory swaps reach listeners as part of the unsolicited push
+        stream, eliminating the need for a follow-up ZQS02/ZQI00 poll
+        after every control command.
+        """
+        LumagenProtocol._apply_i24(data, state)
+
+        fields = data.split(",")
+        if len(fields) > _I25_INPUT_MEMORY:
+            mem = fields[_I25_INPUT_MEMORY]
+            if mem:  # Treat empty string the same as "not reported"
+                state.input_memory = mem
+        if len(fields) > _I25_POWER_STATE:
+            state.power_on = fields[_I25_POWER_STATE] == "1"
 
     @staticmethod
     def _apply_i2x(data: str, state: LumagenState) -> None:

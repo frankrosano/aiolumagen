@@ -57,7 +57,7 @@ uv run python examples/via_url.py 'esphome://10.0.0.42:6053/?port_name=Lumagen&k
 
 - 9600 8N1 ASCII; commands 1–6 chars, no CR terminator; queries start with `ZQ`; responses start with `!`.
 - The Lumagen **may echo the sent command** as a prefix on the response line. The protocol layer must scan for `!` rather than assuming it's at position 0.
-- Unsolicited reports require user setup on the device: **Menu → Other → I/O Setup → RS-232 Setup → Report mode changes → Full v4 → Save**. Without this, the library still works via polling — keep that path correct.
+- Unsolicited reports require user setup on the device: **Menu → Other → I/O Setup → RS-232 Setup → Report mode changes → Full v5 → Save** (or Full v4 on older firmware). Without this, the library still works via polling — keep that path correct.
 
 ## Exception Mapping (contract with `ha-lumagen`)
 

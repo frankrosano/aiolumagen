@@ -37,11 +37,20 @@ class InputStatus(StrEnum):
 
 
 class SourceMode(StrEnum):
-    """Source scan mode reported in the `!I24` G field (index 17)."""
+    """Source scan mode reported in the `!I24`/`!I25` G field (index 17).
+
+    The Lumagen historically used ``-`` to mean "no input detected"; the
+    Full v5 firmware introduced ``n`` as a distinct value for the same
+    condition (observed empirically — the older ``-`` may still appear
+    during transient states). Both are exposed as the same enum member
+    ``NO_INPUT`` so consumers can compare by identity without caring which
+    wire byte the firmware sent.
+    """
 
     INTERLACED = "i"
     PROGRESSIVE = "p"
     NO_INPUT = "-"
+    NO_INPUT_V5 = "n"
 
 
 @dataclass(slots=True)

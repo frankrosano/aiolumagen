@@ -14,7 +14,7 @@ Located at `../esphome-lumagen/References/` from this repo:
 
 | File | What it is |
 |---|---|
-| `Tip0011_RS232CommandInterface_111023.pdf` | **The** Lumagen RS-232 command reference. Authoritative for every `ZQ` query, command syntax, `!`-prefixed response, and report code under "Full v4" mode. |
+| `Tip0011_RS232CommandInterface_111023.pdf` | **The** Lumagen RS-232 command reference. Authoritative for every `ZQ` query, command syntax, `!`-prefixed response, and report code under "Full v4" mode. The 11/2023 edition predates the firmware's "Full v5" / `!I25` mode (deduced empirically — see `protocol.py` for the v5 layout). |
 | `Radiance_Pro_Manual_070621.pdf` | User manual. Useful for vocabulary (aspect modes, memories, HDR pipeline) so enum names and docstrings match Lumagen's terms. |
 | `crestron-driver/` | Crestron sample modules (mostly binary). Behavioral oracle for cross-checking command strings and parsing. |
 | `Pronto/Lumagen_Pronto_Codes.db` | Pronto IR code database. Discrete-IR equivalents of OSD/aspect/memory commands. |
