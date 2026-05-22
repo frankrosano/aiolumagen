@@ -94,6 +94,8 @@ class Query(StrEnum):
     FULL_STATUS = "ZQI24"
     FULL_STATUS_V5 = "ZQI25"
     SHARPNESS = "ZQI30"
+    DISPLAY_REC2020 = "ZQI50"
+    SOURCE_HDR_STATUS = "ZQI52"
     GAME_MODE = "ZQI53"
     AUTO_ASPECT = "ZQI54"
 
@@ -162,3 +164,33 @@ def subtitle_shift_command(level: int) -> str:
 def reset_auto_aspect_command() -> str:
     """``ZY550`` — reset and reinitiate automatic aspect detection."""
     return "ZY550"
+
+
+def hdr_intensity_mapping_command(*, display_max_nits: int, gamma_mode: str) -> str:
+    """Build a ``ZY417XXXXXG`` HDR intensity-mapping command.
+
+    Requires a CR terminator on send. Per Tip0011:
+
+    * ``XXXXX`` — display peak luminance in nits, zero-padded to 5 digits.
+      ``00000`` disables HDR mapping; otherwise ``00050``-``10000`` sets
+      the display's max level (target nits the Lumagen tone-maps toward).
+    * ``G`` — gamma mode: ``A`` (auto, recommended), ``H`` (force HDR),
+      ``S`` (force SDR).
+
+    The command applies to the **currently selected output CMS**. The
+    Lumagen menu reaches the same setting at
+    *Output → CMS → CMSx → HDR Mapping*. There's no documented query
+    that returns the current value, so callers wanting to track state
+    have to remember what they last sent (the integration handles this
+    optimistically).
+
+    :param display_max_nits: 0 (disable mapping), or 50-10000 (active).
+    :param gamma_mode: 'A', 'H', or 'S'.
+    """
+    if display_max_nits != 0 and not 50 <= display_max_nits <= 10000:
+        raise ValueError(
+            f"display_max_nits must be 0 (disable) or 50-10000, got {display_max_nits}"
+        )
+    if gamma_mode not in ("A", "H", "S"):
+        raise ValueError(f"gamma_mode must be 'A', 'H', or 'S'; got {gamma_mode!r}")
+    return f"ZY417{display_max_nits:05d}{gamma_mode}"

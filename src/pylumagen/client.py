@@ -28,6 +28,7 @@ from pylumagen.commands import (
     Query,
     fan_speed_command,
     game_mode_command,
+    hdr_intensity_mapping_command,
     input_command,
     reset_auto_aspect_command,
     sharpness_command,
@@ -313,6 +314,19 @@ class LumagenClient:
         """Send ``ZQI54`` and update :attr:`state.auto_aspect`."""
         await self.send_command(Query.AUTO_ASPECT.value)
 
+    async def query_display_rec2020(self) -> None:
+        """Send ``ZQI50`` and update :attr:`state.display_supports_rec2020`."""
+        await self.send_command(Query.DISPLAY_REC2020.value)
+
+    async def query_source_hdr_status(self) -> None:
+        """Send ``ZQI52`` and update :attr:`state.hdr_*` mastering fields.
+
+        For SDR sources the Lumagen returns placeholder zeros; the parser
+        leaves the structured fields at ``None`` rather than exposing
+        misleading "0 nits" readings to consumers.
+        """
+        await self.send_command(Query.SOURCE_HDR_STATUS.value)
+
     async def set_sharpness(
         self,
         *,
@@ -362,6 +376,30 @@ class LumagenClient:
         """
         await self.send_command(reset_auto_aspect_command(), cr=True, refresh=False)
         await self.query_auto_aspect()
+
+    async def set_hdr_intensity_mapping(
+        self, *, display_max_nits: int, gamma_mode: str = "A"
+    ) -> None:
+        """Set the active CMS's HDR mapping target via ``ZY417XXXXXG``.
+
+        :param display_max_nits: 0 to disable HDR mapping, or 50-10000 to
+            set the display's peak luminance (the target the Lumagen tone-
+            maps toward).
+        :param gamma_mode: ``A`` (auto, recommended), ``H`` (force HDR
+            gamma), or ``S`` (force SDR gamma).
+
+        There's no documented query that returns the active mapping
+        values, so this is fire-and-forget — the integration tracks the
+        last-set values optimistically. The setting is per-CMS and
+        persists until the next ``ZY417`` for the same CMS.
+        """
+        await self.send_command(
+            hdr_intensity_mapping_command(
+                display_max_nits=display_max_nits, gamma_mode=gamma_mode,
+            ),
+            cr=True,
+            refresh=False,
+        )
 
     def request_refresh(self) -> None:
         """Schedule follow-up status queries on the :attr:`REFRESH_TICKS` schedule.

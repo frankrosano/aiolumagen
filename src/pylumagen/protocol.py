@@ -200,6 +200,10 @@ class LumagenProtocol:
             self._apply_i2x(data, pending)
         elif code == "I30":
             self._handle_i30(data, pending)
+        elif code == "I50":
+            pending.display_supports_rec2020 = data[:1] == "Y"
+        elif code == "I52":
+            self._handle_i52(data, pending)
         elif code == "I53":
             pending.game_mode = data[:1] == "1"
         elif code == "I54":
@@ -276,6 +280,56 @@ class LumagenProtocol:
                 state.sharpness_level = level
         if len(data) >= 3 and data[2] in ("H", "N"):
             state.sharpness_sensitivity = SharpnessSensitivity(data[2])
+
+    @staticmethod
+    def _handle_i52(data: str, state: LumagenState) -> None:
+        """!I52 = source HDR status: ``V,Min,Max,Cll``.
+
+        Per Tip0011:
+
+        * ``V`` = 0 (source not HDR) or 1 (source is HDR)
+        * ``Min`` = source mastering display minimum luminance, decimal
+          (e.g. ``.0050``).
+        * ``Max`` = source mastering display max luminance, integer nits.
+        * ``Cll`` = MaxCLL, integer nits.
+
+        For SDR sources the device fills Min/Max/Cll with zero
+        placeholders (``0,.0000,0,0``). We only populate the structured
+        fields when V=1; SDR keeps them at None so an entity reads
+        "unknown" rather than a misleading "0 nits".
+        """
+        parts = data.split(",")
+        if not parts:
+            return
+        is_hdr = parts[0] == "1"
+        # Note: !I52 is parallel to !I24's HDR flag; trust !I24 as primary
+        # but also reflect this query's view in is_hdr/hdr_status so a
+        # standalone ZQI52 still updates the sensors.
+        state.is_hdr = is_hdr
+        state.hdr_status = HdrStatus.HDR if is_hdr else HdrStatus.SDR
+        if not is_hdr:
+            # Clear any stale mastering metadata when the source flips to SDR.
+            state.hdr_source_min_luminance = None
+            state.hdr_source_max_luminance = None
+            state.hdr_source_max_cll = None
+            return
+
+        # HDR source — pull mastering metadata.
+        if len(parts) >= 2:
+            try:
+                state.hdr_source_min_luminance = float(parts[1])
+            except (TypeError, ValueError):
+                _LOGGER.debug("Could not parse !I52 Min field %r", parts[1])
+        if len(parts) >= 3:
+            try:
+                state.hdr_source_max_luminance = int(parts[2])
+            except (TypeError, ValueError):
+                _LOGGER.debug("Could not parse !I52 Max field %r", parts[2])
+        if len(parts) >= 4:
+            try:
+                state.hdr_source_max_cll = int(parts[3])
+            except (TypeError, ValueError):
+                _LOGGER.debug("Could not parse !I52 Cll field %r", parts[3])
 
     @staticmethod
     def _apply_i24(data: str, state: LumagenState) -> None:

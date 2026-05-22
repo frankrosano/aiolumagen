@@ -12,6 +12,7 @@ from pylumagen.exceptions import (
 )
 from pylumagen.state import (
     Colorspace,
+    HdrGammaMode,
     HdrStatus,
     InputStatus,
     LumagenState,
@@ -23,6 +24,7 @@ from pylumagen.transport import LumagenTransport
 __all__ = [
     "Aspect",
     "Colorspace",
+    "HdrGammaMode",
     "HdrStatus",
     "Input",
     "InputStatus",
@@ -38,4 +40,4 @@ __all__ = [
     "SourceMode",
 ]
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"

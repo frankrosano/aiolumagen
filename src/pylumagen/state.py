@@ -64,6 +64,26 @@ class SharpnessSensitivity(StrEnum):
     NORMAL = "N"
 
 
+class HdrGammaMode(StrEnum):
+    """Gamma-mode flag in ``ZY417XXXXXG`` HDR intensity-mapping commands.
+
+    Per Tip0011: the trailing ``G`` selects which gamma curve feeds the
+    3D LUT during HDR-to-SDR mapping.
+
+    * ``A`` — auto (Lumagen picks based on source metadata, recommended)
+    * ``H`` — force HDR gamma
+    * ``S`` — force SDR gamma
+
+    There's no documented query for the active mode, so this enum only
+    serves the write side — the integration tracks the last-set value
+    optimistically.
+    """
+
+    AUTO = "A"
+    HDR = "H"
+    SDR = "S"
+
+
 @dataclass(slots=True)
 class LumagenState:
     """Snapshot of a Lumagen's reported state.
@@ -123,6 +143,23 @@ class LumagenState:
 
     # --- Auto aspect (from !I54) ---
     auto_aspect: bool | None = None
+
+    # --- HDR — source mastering metadata (from !I52) ---
+    # Populated only when V=1 (source is actually HDR). For SDR sources
+    # the device reports placeholder zeros; we leave fields as None
+    # rather than expose those as "0 nits" which would be misleading.
+    hdr_source_min_luminance: float | None = None
+    """Source mastering display minimum luminance in nits (e.g. 0.0050)."""
+
+    hdr_source_max_luminance: int | None = None
+    """Source mastering display max luminance in nits (e.g. 1000)."""
+
+    hdr_source_max_cll: int | None = None
+    """Source MaxCLL in nits (max content light level for the HDR title)."""
+
+    # --- HDR — display capability (from !I50) ---
+    display_supports_rec2020: bool | None = None
+    """Whether the connected display reports Rec.2020 EDID support."""
 
     # --- Bookkeeping ---
     last_update_codes: tuple[str, ...] = field(default_factory=tuple)

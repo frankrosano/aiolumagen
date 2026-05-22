@@ -568,3 +568,86 @@ async def test_query_methods_dispatch_correct_strings(
 
     await c.stop()
     assert fake_transport.sent == [b"ZQI30", b"ZQI53", b"ZQI54"]
+
+
+# ---------- Phase 2 HDR setter / query tests ----------
+
+
+async def test_query_display_rec2020_dispatches_correct_string(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.query_display_rec2020()
+    await c.query_source_hdr_status()
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZQI50", b"ZQI52"]
+
+
+async def test_set_hdr_intensity_mapping_writes_command_with_cr(
+    fake_transport: FakeTransport,
+) -> None:
+    """ZY417 takes 5-digit nits + gamma mode, terminated with CR."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_hdr_intensity_mapping(display_max_nits=1000, gamma_mode="A")
+
+    await c.stop()
+    # 1000 nits zero-padded to 5 digits + auto gamma + CR.
+    assert fake_transport.sent == [b"ZY41701000A\r"]
+
+
+async def test_set_hdr_intensity_mapping_disable_uses_zero_nits(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.set_hdr_intensity_mapping(display_max_nits=0, gamma_mode="A")
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY41700000A\r"]
+
+
+async def test_set_hdr_intensity_mapping_validates_inputs(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    with pytest.raises(ValueError, match="50-10000"):
+        await c.set_hdr_intensity_mapping(display_max_nits=49, gamma_mode="A")
+    with pytest.raises(ValueError, match="50-10000"):
+        await c.set_hdr_intensity_mapping(display_max_nits=20000, gamma_mode="A")
+    with pytest.raises(ValueError, match="'A', 'H', or 'S'"):
+        await c.set_hdr_intensity_mapping(display_max_nits=1000, gamma_mode="X")
+
+    assert fake_transport.sent == []
+    await c.stop()

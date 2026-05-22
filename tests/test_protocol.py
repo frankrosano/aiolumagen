@@ -7,6 +7,8 @@ protocol code, update these first.
 
 from __future__ import annotations
 
+import pytest
+
 from pylumagen.protocol import LumagenProtocol
 from pylumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
 
@@ -314,3 +316,87 @@ def test_i54_auto_aspect_on_off() -> None:
     assert updates[-1][0].auto_aspect is True
     proto.feed_bytes(b"!I54,0\r\n")
     assert updates[-1][0].auto_aspect is False
+
+
+# ---------- HDR (Phase 2) ----------
+
+
+def test_i50_display_rec2020_yes() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I50,Y\r\n")
+    state, codes = updates[-1]
+    assert codes == ("I50",)
+    assert state.display_supports_rec2020 is True
+
+
+def test_i50_display_rec2020_no() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I50,N\r\n")
+    assert updates[-1][0].display_supports_rec2020 is False
+
+
+def test_i52_sdr_source_clears_mastering_metadata_and_keeps_none() -> None:
+    """SDR source — V=0 with placeholder zeros; mastering fields stay None."""
+    updates, proto = _collect()
+    # Per the doc, SDR sources are reported as "V=0" with placeholder
+    # zeros for the rest of the fields.
+    proto.feed_bytes(b"!I52,0,.0000,0,0\r\n")
+    state, codes = updates[-1]
+    assert codes == ("I52",)
+    assert state.is_hdr is False
+    assert state.hdr_status is HdrStatus.SDR
+    assert state.hdr_source_min_luminance is None
+    assert state.hdr_source_max_luminance is None
+    assert state.hdr_source_max_cll is None
+
+
+def test_i52_hdr_source_populates_mastering_metadata() -> None:
+    """HDR source — V=1 with real Min/Max/Cll values."""
+    updates, proto = _collect()
+    # Typical 1000-nit HDR10 title with a 4000-nit master.
+    proto.feed_bytes(b"!I52,1,.0050,1000,4000\r\n")
+    state, _ = updates[-1]
+    assert state.is_hdr is True
+    assert state.hdr_status is HdrStatus.HDR
+    assert state.hdr_source_min_luminance == pytest.approx(0.0050)
+    assert state.hdr_source_max_luminance == 1000
+    assert state.hdr_source_max_cll == 4000
+
+
+def test_i52_transition_hdr_to_sdr_clears_stale_metadata() -> None:
+    """When the source flips HDR -> SDR, mastering metadata must clear.
+
+    Without this, a pre-HDR-content sensor reading would persist
+    indefinitely after switching to an SDR source, misrepresenting
+    the current source.
+    """
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I52,1,.0050,1000,4000\r\n")
+    proto.feed_bytes(b"!I52,0,.0000,0,0\r\n")
+    state, _ = updates[-1]
+    assert state.is_hdr is False
+    assert state.hdr_source_min_luminance is None
+    assert state.hdr_source_max_luminance is None
+    assert state.hdr_source_max_cll is None
+
+
+def test_i52_malformed_max_field_is_tolerated() -> None:
+    """Garbage in a field doesn't poison the rest of the state."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I52,1,.0050,not-a-number,4000\r\n")
+    state, _ = updates[-1]
+    assert state.is_hdr is True
+    assert state.hdr_source_min_luminance == pytest.approx(0.0050)
+    assert state.hdr_source_max_luminance is None  # malformed, dropped
+    assert state.hdr_source_max_cll == 4000  # following field still parses
+
+
+def test_i52_truncated_payload_only_populates_what_arrives() -> None:
+    """Old firmware with a shorter !I52 — populate what we can read."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I52,1,.0050\r\n")
+    state, _ = updates[-1]
+    assert state.is_hdr is True
+    assert state.hdr_source_min_luminance == pytest.approx(0.0050)
+    assert state.hdr_source_max_luminance is None
+    assert state.hdr_source_max_cll is None
