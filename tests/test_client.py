@@ -651,3 +651,78 @@ async def test_set_hdr_intensity_mapping_validates_inputs(
 
     assert fake_transport.sent == []
     await c.stop()
+
+
+# ---------- Input label discovery (query_input_labels) ----------
+
+
+async def test_query_input_labels_sends_serial_queries(
+    fake_transport: FakeTransport,
+) -> None:
+    """query_input_labels issues ZQS1<mem><0-7> for inputs 1-8, in order."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    await c.query_input_labels(memory="A", settle=0)
+
+    await c.stop()
+    assert fake_transport.sent == [
+        b"ZQS1A0", b"ZQS1A1", b"ZQS1A2", b"ZQS1A3",
+        b"ZQS1A4", b"ZQS1A5", b"ZQS1A6", b"ZQS1A7",
+    ]
+
+
+async def test_query_input_labels_validates_memory(
+    fake_transport: FakeTransport,
+) -> None:
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+    with pytest.raises(ValueError, match="'A'-'D'"):
+        await c.query_input_labels(memory="Z", settle=0)
+    assert fake_transport.sent == []
+    await c.stop()
+
+
+async def test_query_input_labels_populates_state_end_to_end(
+    fake_transport: FakeTransport,
+) -> None:
+    """Prime + response feed fills state.input_labels; unanswered inputs stay unset.
+
+    Wraps the transport write so each ZQS1A<y> is answered synchronously with
+    a canned label, exercising the full serialized prime->send->correlate loop.
+    """
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+    fake_transport.sent.clear()
+
+    original_write = fake_transport.write
+    # y (input-1) -> label. Inputs 4-8 (y=3..7) deliberately unanswered.
+    answers = {0: "Apple TV", 1: "Roku", 2: "Shield"}
+
+    async def _write_and_answer(data: bytes) -> None:
+        await original_write(data)
+        if data.startswith(b"ZQS1A") and len(data) == 6:
+            name = answers.get(int(chr(data[5])))
+            if name is not None:
+                fake_transport.feed(f"!S1A,{name}\r\n".encode())
+
+    fake_transport.write = _write_and_answer  # type: ignore[method-assign]
+
+    await c.query_input_labels(memory="A", settle=0)
+    await c.stop()
+
+    assert c.state.input_labels == {1: "Apple TV", 2: "Roku", 3: "Shield"}

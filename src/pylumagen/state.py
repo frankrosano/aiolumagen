@@ -111,6 +111,18 @@ class LumagenState:
     input_memory: str | None = None
     input_info_raw: str | None = None
 
+    # --- Input labels (from !S1x, populated by ZQS1XY queries) ---
+    input_labels: dict[int, str] = field(default_factory=dict)
+    """Logical input number (1-8) -> configured label (e.g. ``{2: "Apple TV"}``).
+
+    Empty until :meth:`~pylumagen.client.LumagenClient.query_input_labels`
+    runs. The Lumagen's label response (``!S1x,<label>``) carries only the
+    *memory* letter, not the input number, so the protocol layer correlates
+    each response to the input the client last asked about (see
+    ``LumagenProtocol.expect_input_label``). Labels are per (input, memory);
+    this map holds one memory's worth (memory A by default).
+    """
+
     # --- Input video format (from !I01) ---
     input_video_raw: str | None = None
 

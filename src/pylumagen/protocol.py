@@ -112,15 +112,41 @@ class LumagenProtocol:
         self._on_update = on_update
         self._state = LumagenState()
         self._rx = bytearray()
+        # Correlation context for input-label queries. The Lumagen's label
+        # response (!S1x,<label>) reports only the memory letter, never the
+        # input number, so the client primes this with the input it's about
+        # to ask for; the next !S1x response is attributed to it. Only valid
+        # while a serialized query is in flight — labels are query-only, so
+        # no unsolicited !S1x can race it.
+        self._pending_label_input: int | None = None
 
     @property
     def state(self) -> LumagenState:
         """Current accumulated state snapshot."""
         return self._state
 
+    @property
+    def pending_label_input(self) -> int | None:
+        """Input number a subsequent ``!S1x`` label response will be assigned to.
+
+        ``None`` once the pending response has been consumed. Exposed so the
+        client can tell when a label query has been answered before issuing
+        the next one.
+        """
+        return self._pending_label_input
+
+    def expect_input_label(self, input_number: int) -> None:
+        """Prime the parser to attribute the next ``!S1x`` response to ``input_number``.
+
+        Called by the client immediately before it sends a ``ZQS1XY`` label
+        query. See :attr:`pending_label_input`.
+        """
+        self._pending_label_input = input_number
+
     def reset(self) -> None:
-        """Discard any partial line. Call on reconnect."""
+        """Discard any partial line and pending label context. Call on reconnect."""
         self._rx.clear()
+        self._pending_label_input = None
 
     def feed_bytes(self, data: bytes | bytearray) -> None:
         """Append inbound bytes and emit an update for each complete line.
@@ -185,6 +211,21 @@ class LumagenProtocol:
             self._handle_s01(data, pending)
         elif code == "S02":
             pending.power_on = data[:1] == "1"
+        elif code in ("S1A", "S1B", "S1C", "S1D"):
+            # Input label response. ``data`` is the whole label (commas and
+            # spaces preserved). The response carries only the memory letter,
+            # so we rely on the client-primed pending input to know which
+            # logical input it belongs to.
+            if self._pending_label_input is None:
+                _LOGGER.debug(
+                    "Input label response %r with no pending input; ignoring", data
+                )
+                return
+            n = self._pending_label_input
+            self._pending_label_input = None
+            # Build a fresh dict so the previous state's map is untouched —
+            # the equality diff below depends on old and new not aliasing.
+            pending.input_labels = {**self._state.input_labels, n: data}
         elif code == "I00":
             self._handle_i00(data, pending)
         elif code == "I01":

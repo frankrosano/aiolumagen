@@ -400,3 +400,80 @@ def test_i52_truncated_payload_only_populates_what_arrives() -> None:
     assert state.hdr_source_min_luminance == pytest.approx(0.0050)
     assert state.hdr_source_max_luminance is None
     assert state.hdr_source_max_cll is None
+
+
+# ---------- Input labels (ZQS1XY / !S1x) ----------
+
+
+def test_input_label_correlates_to_pending_input() -> None:
+    """A primed input number attributes the next !S1x response to that input."""
+    updates, proto = _collect()
+    proto.expect_input_label(6)
+    proto.feed_bytes(b"!S1B,Apple TV\r\n")
+    state, codes = updates[-1]
+    assert codes == ("S1B",)
+    assert state.input_labels == {6: "Apple TV"}
+    assert proto.pending_label_input is None  # consumed
+
+
+def test_input_label_doc_example() -> None:
+    """Tip0011 example: ZQS1B5 -> !S1B,Input 6B (memory B, input 6)."""
+    updates, proto = _collect()
+    proto.expect_input_label(6)
+    proto.feed_bytes(b"!S1B,Input 6B\r\n")
+    assert updates[-1][0].input_labels == {6: "Input 6B"}
+
+
+def test_input_label_without_pending_is_ignored() -> None:
+    """An !S1x with no primed input can't be correlated, so it's dropped."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!S1A,Orphan\r\n")
+    assert updates == []
+    assert proto.state.input_labels == {}
+
+
+def test_input_label_tolerates_echo_prefix() -> None:
+    """Echo-on firmware puts the query before the response on one line."""
+    updates, proto = _collect()
+    proto.expect_input_label(1)
+    proto.feed_bytes(b"ZQS1A0!S1A,Roku\r\n")
+    assert updates[-1][0].input_labels == {1: "Roku"}
+
+
+def test_input_label_preserves_commas() -> None:
+    """The label is everything after the code — embedded commas are kept."""
+    updates, proto = _collect()
+    proto.expect_input_label(3)
+    proto.feed_bytes(b"!S1A,Foo, Bar\r\n")
+    assert updates[-1][0].input_labels == {3: "Foo, Bar"}
+
+
+def test_input_labels_accumulate_across_queries() -> None:
+    """Sequential prime+feed builds the map without dropping earlier entries."""
+    updates, proto = _collect()
+    proto.expect_input_label(1)
+    proto.feed_bytes(b"!S1A,Apple TV\r\n")
+    proto.expect_input_label(2)
+    proto.feed_bytes(b"!S1A,Roku\r\n")
+    assert updates[-1][0].input_labels == {1: "Apple TV", 2: "Roku"}
+
+
+def test_input_label_update_does_not_mutate_prior_snapshot() -> None:
+    """Each label update creates a fresh dict, so earlier snapshots stay stable."""
+    updates, proto = _collect()
+    proto.expect_input_label(1)
+    proto.feed_bytes(b"!S1A,Apple TV\r\n")
+    first_snapshot = updates[-1][0].input_labels
+    proto.expect_input_label(2)
+    proto.feed_bytes(b"!S1A,Roku\r\n")
+    # The earlier callback's dict must not have gained input 2.
+    assert first_snapshot == {1: "Apple TV"}
+
+
+def test_reset_clears_pending_label_input() -> None:
+    _updates, proto = _collect()
+    proto.expect_input_label(4)
+    proto.reset()
+    assert proto.pending_label_input is None
+    proto.feed_bytes(b"!S1A,Late\r\n")
+    assert proto.state.input_labels == {}

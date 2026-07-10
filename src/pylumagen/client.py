@@ -327,6 +327,37 @@ class LumagenClient:
         """
         await self.send_command(Query.SOURCE_HDR_STATUS.value)
 
+    async def query_input_labels(
+        self, memory: str = "A", *, settle: float = 0.15
+    ) -> None:
+        """Query configured labels for inputs 1-8 into :attr:`state.input_labels`.
+
+        The Lumagen has no bulk label query, and each per-label response
+        (``!S1x,<label>``) reports only the memory letter — not the input
+        number. So this serializes: it primes the parser with the input it's
+        about to ask for (:meth:`LumagenProtocol.expect_input_label`), sends
+        the ``ZQS1XY`` query, then waits ``settle`` seconds for the reply to
+        land before moving on. ``settle`` must comfortably exceed the
+        round-trip time — a ~15-char reply at 9600 baud is ~15 ms, so the
+        0.15 s default leaves ample slack for the ESPHome/serial path.
+
+        :param memory: Input memory to read labels from, ``A``-``D``. Labels
+            are stored per (input, memory); ``A`` is the default/primary bank.
+        :param settle: Seconds to wait for each response before the next query.
+
+        Inputs the device doesn't answer for (unpopulated inputs, or firmware
+        without ``ZQS1`` support) are simply left unset — this never raises on
+        a missing response, only on an invalid ``memory`` argument.
+        """
+        memory = memory.upper()
+        if memory not in ("A", "B", "C", "D"):
+            raise ValueError(f"input-label memory must be 'A'-'D', got {memory!r}")
+        for input_number in range(1, 9):
+            self._protocol.expect_input_label(input_number)
+            # ZQS1XY: X = memory letter, Y = input - 1 (so '0' for input 1).
+            await self.send_command(f"ZQS1{memory}{input_number - 1}")
+            await asyncio.sleep(settle)
+
     async def set_sharpness(
         self,
         *,
