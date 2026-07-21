@@ -15,7 +15,7 @@ It explicitly does **not** know about Home Assistant, UI, or any specific transp
 
 ## Sibling Repos
 
-- `esphome-lumagen` — ESPHome firmware that exposes the Lumagen's USB-B port over the network as a `serial_proxy`. `pylumagen` is one possible client of that proxy.
+- `esphome-lumagen` — ESPHome firmware that exposes the Lumagen's RS-232 port over the network as a `serial_proxy` (via a MAX3232 level shifter). `pylumagen` is one possible client of that proxy.
 - `ha-lumagen` — Home Assistant custom integration. Thin wrapper over this library; owns config flow, coordinator, and entities.
 
 ## Design Goals

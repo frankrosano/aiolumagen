@@ -11,7 +11,7 @@ esphome-lumagen   →   pylumagen   →   ha-lumagen
 
 - **`pylumagen` has zero `homeassistant` imports.** Not in tests, not in helpers, not anywhere. HA-shaped concerns surface via documented `LumagenError` subclasses; the integration translates them.
 - **`ha-lumagen` has zero protocol parsing.** No `!` scans, no `ZQ` formatting, no CSV splits in `coordinator.py`/`button.py`/etc. If you'd need to read `Tip0011` to write a line of code in this repo, that line belongs in `pylumagen`.
-- **`esphome-lumagen` has zero Lumagen-specific logic.** It's a serial bridge. The Lumagen's VID/PID and baud rate are the only Lumagen-aware values in the YAML — everything else (commands, responses, state) is `pylumagen`'s job.
+- **`esphome-lumagen` has zero Lumagen-specific logic.** It's a serial bridge. The baud rate (9600 8N1) and the RS-232 UART pin wiring (`tx_pin`/`rx_pin`) are the only Lumagen-aware values in the YAML — everything else (commands, responses, state) is `pylumagen`'s job.
 
 If you violate one of these, stop and move the code.
 
@@ -43,8 +43,8 @@ Don't introduce dead API in `pylumagen` "for `ha-lumagen` to consume later." Shi
 | State stops updating; reconnect storm | `pylumagen` (`client.py`) |
 | Entity shows wrong icon / device class / unit | `ha-lumagen` |
 | Config flow can't find the serial port | `ha-lumagen` (or HA's `usb` integration upstream) |
-| Bytes never reach the Lumagen / FTDI errors at boot | `esphome-lumagen` |
-| Connection drops over the network | usually `serialx` (upstream); occasionally `esphome-lumagen` (USB/Ethernet) |
+| Bytes never reach the Lumagen / no serial response (TX/RX crossover) | `esphome-lumagen` |
+| Connection drops over the network | usually `serialx` (upstream); occasionally `esphome-lumagen` (Ethernet) |
 
 ## Testing Strategy (per repo)
 
