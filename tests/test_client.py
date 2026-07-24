@@ -35,6 +35,42 @@ async def test_start_connects_and_sends_startup_sequence(
     assert b"ZQI25" in sent
 
 
+async def test_startup_queries_non_pushed_secondary_state(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """Startup must pull the state the !I25 push doesn't carry.
+
+    Regression: sharpness (ZQI30), game mode (ZQI53), auto aspect (ZQI54),
+    display Rec.2020 (ZQI50) and source HDR (ZQI52) were never queried, so
+    their entities sat at "unknown" forever and set_sharpness couldn't
+    preserve enabled/level.
+    """
+    await client.start()
+    sent = b"".join(fake_transport.sent)
+    for query in (b"ZQI30", b"ZQI53", b"ZQI54", b"ZQI50", b"ZQI52"):
+        assert query in sent, f"{query!r} not issued at startup: {fake_transport.sent}"
+
+
+async def test_status_poll_queries_secondary_state_when_powered_on(
+    fake_transport: FakeTransport,
+) -> None:
+    """Powered-on status polls refresh the non-pushed fields too."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=0.05,
+        stale_timeout=10.0,
+    )
+    await c.start()
+    fake_transport.feed(b"!S02,1\r\n")  # power on -> status branch active
+    fake_transport.sent.clear()
+    await asyncio.sleep(0.12)  # a couple of status intervals
+    await c.stop()
+    sent = b"".join(fake_transport.sent)
+    assert b"ZQI25" in sent  # primary status still polled
+    assert b"ZQI30" in sent  # sharpness refreshed alongside it
+
+
 async def test_inbound_bytes_update_state(
     fake_transport: FakeTransport, client: LumagenClient
 ) -> None:

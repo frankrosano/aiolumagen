@@ -327,6 +327,34 @@ class LumagenClient:
         """
         await self.send_command(Query.SOURCE_HDR_STATUS.value)
 
+    async def _query_secondary_status(self) -> None:
+        """Query the state the Full v5 push stream doesn't carry.
+
+        Sharpness (``!I30``), game mode (``!I53``), auto aspect (``!I54``),
+        display Rec.2020 support (``!I50``) and source HDR mastering
+        metadata (``!I52``) are only emitted in response to their explicit
+        ``ZQ`` queries — none of them ride in the ``!I25`` status push. If
+        we never issue these, ``state.sharpness_*`` / ``game_mode`` /
+        ``auto_aspect`` / ``display_supports_rec2020`` / ``hdr_*`` stay
+        ``None`` forever and their HA entities read "unknown" — and any
+        compound write that tries to *preserve* an unread field (e.g.
+        ``set_sharpness`` keeping enabled+level while changing sensitivity)
+        silently falls back to defaults.
+
+        Run at startup and on each powered-on status poll so values changed
+        from the front-panel remote stay in sync. Connection errors are
+        swallowed at debug level: a blip on a secondary query must not abort
+        startup or a poll cycle.
+        """
+        try:
+            await self.query_sharpness()
+            await self.query_game_mode()
+            await self.query_auto_aspect()
+            await self.query_display_rec2020()
+            await self.query_source_hdr_status()
+        except LumagenConnectionError as err:
+            _LOGGER.debug("Secondary status query failed (transport down): %s", err)
+
     async def query_input_labels(
         self, memory: str = "A", *, settle: float = 0.15
     ) -> None:
@@ -503,6 +531,10 @@ class LumagenClient:
                     _LOGGER.debug(
                         "Lumagen startup handshake succeeded on attempt %d", attempt + 1
                     )
+                    # The Full v5 push doesn't carry sharpness / game mode /
+                    # auto aspect / HDR-mapping state — pull those once now so
+                    # entities don't sit at "unknown" until the first poll.
+                    await self._query_secondary_status()
                     return
                 await asyncio.sleep(0.2)
 
@@ -588,6 +620,10 @@ class LumagenClient:
                         and self.state.power_on is True
                     ):
                         await self.query_full_status()
+                        # Keep the non-pushed fields (sharpness, game mode,
+                        # auto aspect, HDR mapping) in sync with front-panel
+                        # remote changes.
+                        await self._query_secondary_status()
                         s_due = now + s_iv
                 except LumagenConnectionError as err:
                     _LOGGER.warning("Lumagen poll failed: %s", err)
