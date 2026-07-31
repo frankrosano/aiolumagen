@@ -418,10 +418,17 @@ class LumagenClient:
 
         Reverse-engineered from the firmware (see
         ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md``); not
-        documented in the bundled Tip0011 PDF. There is no query for the
-        current fan speed in either the PDF or the firmware strings, so
-        this method only writes — ``state`` won't reflect the new value and
-        consumers have to track it optimistically.
+        documented in the bundled Tip0011 PDF.
+
+        **Write-only, permanently.** There is no fan-speed query, and this
+        is settled rather than merely undocumented: it's absent from
+        Tip0011 and from the firmware-strings command table (the same
+        extraction that *did* surface this setter and the undocumented
+        ``ZQI54``), and probing ``ZQI55``-``ZQI57`` plus ``ZQS05``-``ZQS07``
+        on a 4242 returned empty payloads — which, per the note in
+        :mod:`pylumagen.protocol`, is indistinguishable from a nonexistent
+        code. So ``state`` will never reflect fan speed and consumers must
+        track it optimistically. Don't re-probe for this.
         """
         await self.send_command(fan_speed_command(speed), cr=True, refresh=False)
 

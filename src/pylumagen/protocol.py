@@ -18,6 +18,13 @@ Key invariants (from the old C++ comments, confirmed against captures):
   try to handle that — we trust the boundary is a newline.
 * Known response codes: S00, S01, S02, I00, I01, I21, I22, I23, I24, I25,
   O01. Unknown codes are logged at DEBUG and ignored.
+* **A response prefix does not imply the query is supported.** The device
+  answers *any* syntactically valid ``ZQ`` code by echoing the matching
+  code with an empty payload — ``ZQI99`` returns ``!I99,`` exactly like
+  ``ZQI55`` does. So when probing for undocumented queries, the only
+  positive signal is a *non-empty* payload; the presence of a ``!Ixx,``
+  line proves nothing. Verified on a Radiance Pro 4242 across both the
+  ``ZQI`` and ``ZQS`` namespaces.
 
 Full v5 (``ZQI25`` / ``!I25``) is the recommended unsolicited-reporting
 mode for current Lumagen firmware. It extends the v4 layout with two new
