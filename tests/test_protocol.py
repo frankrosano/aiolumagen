@@ -302,6 +302,48 @@ def test_i30_sharpness_disabled() -> None:
     assert state.sharpness_sensitivity is SharpnessSensitivity.HIGH
 
 
+def test_i30_sharpness_without_comma_delimiter() -> None:
+    """``!I30Y4N`` (payload packed onto the code) must still decode.
+
+    Regression: the line splitter only took a payload when byte 4 was a
+    comma, so this framing parsed as "no payload" and left every sharpness
+    field None — the entities read "unknown" forever even though the
+    query was being sent and answered.
+    """
+    from pylumagen.state import SharpnessSensitivity
+
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I30Y4N\r\n")
+    state, codes = updates[-1]
+    assert codes == ("I30",)
+    assert state.sharpness_enabled is True
+    assert state.sharpness_level == 4
+    assert state.sharpness_sensitivity is SharpnessSensitivity.NORMAL
+
+
+def test_i30_sharpness_comma_separated_fields() -> None:
+    """``!I30,Y,4,H`` (one field per value) must decode identically."""
+    from pylumagen.state import SharpnessSensitivity
+
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I30,Y,4,H\r\n")
+    state, _ = updates[-1]
+    assert state.sharpness_enabled is True
+    assert state.sharpness_level == 4
+    assert state.sharpness_sensitivity is SharpnessSensitivity.HIGH
+
+
+def test_i30_unparseable_payload_leaves_fields_none() -> None:
+    """Garbage must not fabricate values, but must still keep the raw bytes."""
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I30,????\r\n")
+    state, _ = updates[-1]
+    assert state.sharpness_enabled is None
+    assert state.sharpness_level is None
+    assert state.sharpness_sensitivity is None
+    assert state.sharpness_raw == "????"
+
+
 def test_i53_game_mode_on_off() -> None:
     updates, proto = _collect()
     proto.feed_bytes(b"!I53,1\r\n")

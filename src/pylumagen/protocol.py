@@ -194,7 +194,14 @@ class LumagenProtocol:
         if len(tail) < 3:
             return
         code = tail[:3]
-        data = tail[4:] if len(tail) > 3 and tail[3] == "," else ""
+        # Most responses delimit the payload with a comma (``!S02,1``), but
+        # not all do — a response that packs its payload straight onto the
+        # code (``!I30Y4N``) would otherwise be read as having no payload at
+        # all and silently dropped. Falling back to the remainder is strictly
+        # better than discarding it: every handler validates its own payload,
+        # and for genuinely payload-less responses (``!S00``) the slice is
+        # empty anyway.
+        data = tail[4:] if len(tail) > 3 and tail[3] == "," else tail[3:]
         self._handle_response(code, data)
 
     def _handle_response(self, code: str, data: str) -> None:
@@ -313,14 +320,28 @@ class LumagenProtocol:
         can show the wire bytes if the structured fields look wrong.
         """
         state.sharpness_raw = data
-        if len(data) >= 1 and data[0] in ("Y", "N"):
-            state.sharpness_enabled = data[0] == "Y"
-        if len(data) >= 2 and data[1].isdigit():
-            level = int(data[1])
+        # Tolerate every plausible framing of the same three values. Tip0011
+        # documents the response only as "returns values corresponding to
+        # the ZY521ELS command" with no example payload, and the observed
+        # shape varies:
+        #   !I30Y4N     - packed straight onto the code, no delimiter
+        #   !I30,Y4N    - comma-delimited, values packed
+        #   !I30,Y,4,N  - one comma-separated field per value
+        # Compacting out commas and whitespace reduces all three to "Y4N",
+        # so the positional reads below work regardless of framing.
+        compact = data.replace(",", "").replace(" ", "").strip()
+        if len(compact) >= 1 and compact[0] in ("Y", "N"):
+            state.sharpness_enabled = compact[0] == "Y"
+        if len(compact) >= 2 and compact[1].isdigit():
+            level = int(compact[1])
             if 0 <= level <= 7:
                 state.sharpness_level = level
-        if len(data) >= 3 and data[2] in ("H", "N"):
-            state.sharpness_sensitivity = SharpnessSensitivity(data[2])
+        if len(compact) >= 3 and compact[2] in ("H", "N"):
+            state.sharpness_sensitivity = SharpnessSensitivity(compact[2])
+        if state.sharpness_enabled is None and state.sharpness_level is None:
+            # Nothing recognisable — surface the raw bytes so an unexpected
+            # firmware framing is diagnosable instead of silently unknown.
+            _LOGGER.debug("Could not parse !I30 sharpness payload %r", data)
 
     @staticmethod
     def _handle_i52(data: str, state: LumagenState) -> None:
