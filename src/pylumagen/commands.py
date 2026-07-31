@@ -138,16 +138,24 @@ def game_mode_command(enabled: bool) -> str:
     return "ZY5511" if enabled else "ZY5510"
 
 
-def fan_speed_command(level: int) -> str:
-    """Build a ``ZY552X`` fan-speed command. Level 0-9 (higher = faster).
+def fan_speed_command(speed: int) -> str:
+    """Build a ``ZY552X`` minimum-fan-speed command. Speed 1-10.
 
-    Requires CR terminator on send. Reverse-engineered from the firmware
-    (see ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md``); the
-    bundled Tip0011 PDF doesn't document this command explicitly.
+    ``speed`` is the value the Lumagen shows in its own menu; the wire
+    digit is one lower. Confirmed empirically: sending ``ZY5524`` makes
+    the device report a minimum fan speed of 5, and ``ZY5523`` reports 4.
+    So the documented ``X=0-9`` range (from
+    ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md`` — this command
+    isn't in the bundled Tip0011 PDF at all) is a 0-based index into a
+    1-based display. Callers work in the device's units and this encoder
+    owns the conversion, so there's only one notion of "fan speed" in the
+    library.
+
+    Requires CR terminator on send.
     """
-    if not 0 <= level <= 9:
-        raise ValueError(f"fan speed must be 0-9, got {level}")
-    return f"ZY552{level}"
+    if not 1 <= speed <= 10:
+        raise ValueError(f"fan speed must be 1-10, got {speed}")
+    return f"ZY552{speed - 1}"
 
 
 def subtitle_shift_command(level: int) -> str:

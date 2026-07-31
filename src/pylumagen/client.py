@@ -409,16 +409,21 @@ class LumagenClient:
         await self.send_command(game_mode_command(enabled), cr=True, refresh=False)
         await self.query_game_mode()
 
-    async def set_fan_speed(self, level: int) -> None:
-        """Set minimum fan speed via ``ZY552X`` (0-9; higher = faster).
+    async def set_fan_speed(self, speed: int) -> None:
+        """Set minimum fan speed via ``ZY552X`` (1-10; higher = faster).
+
+        ``speed`` is in the device's own units — the number the Lumagen
+        shows in its menu. The wire digit is one lower; see
+        :func:`~pylumagen.commands.fan_speed_command` for the evidence.
 
         Reverse-engineered from the firmware (see
         ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md``); not
-        documented in the bundled Tip0011 PDF. There is no documented
-        query for the current fan speed, so this method only writes —
-        ``state`` won't reflect the new value.
+        documented in the bundled Tip0011 PDF. There is no query for the
+        current fan speed in either the PDF or the firmware strings, so
+        this method only writes — ``state`` won't reflect the new value and
+        consumers have to track it optimistically.
         """
-        await self.send_command(fan_speed_command(level), cr=True, refresh=False)
+        await self.send_command(fan_speed_command(speed), cr=True, refresh=False)
 
     async def set_subtitle_shift(self, level: int) -> None:
         """Set subtitle shifting via ``ZY553X`` (0/1/2).

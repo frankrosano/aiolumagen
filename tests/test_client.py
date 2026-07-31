@@ -504,7 +504,12 @@ async def test_set_game_mode_writes_with_cr_then_queries(
 async def test_set_fan_speed_writes_with_cr(
     fake_transport: FakeTransport,
 ) -> None:
-    """fan speed has no documented query, so we only write."""
+    """Fan speed has no query at all, so we only write.
+
+    The wire digit is one below the requested speed — the device's menu is
+    1-based over a 0-based wire value, so asking for 3 must send ``ZY5522``
+    (sending ``ZY5523`` would land the device on 4).
+    """
     c = LumagenClient(
         fake_transport,
         power_poll_interval=10.0,
@@ -517,12 +522,13 @@ async def test_set_fan_speed_writes_with_cr(
     await c.set_fan_speed(3)
 
     await c.stop()
-    assert fake_transport.sent == [b"ZY5523\r"]
+    assert fake_transport.sent == [b"ZY5522\r"]
 
 
-async def test_set_fan_speed_validates_range(
+async def test_set_fan_speed_spans_the_full_wire_range(
     fake_transport: FakeTransport,
 ) -> None:
+    """Speed 1 and 10 must map to the wire ends, 0 and 9."""
     c = LumagenClient(
         fake_transport,
         power_poll_interval=10.0,
@@ -530,8 +536,30 @@ async def test_set_fan_speed_validates_range(
         stale_timeout=30.0,
     )
     await c.start()
-    with pytest.raises(ValueError, match="0-9"):
-        await c.set_fan_speed(10)
+    fake_transport.sent.clear()
+
+    await c.set_fan_speed(1)
+    await c.set_fan_speed(10)
+
+    await c.stop()
+    assert fake_transport.sent == [b"ZY5520\r", b"ZY5529\r"]
+
+
+async def test_set_fan_speed_validates_range(
+    fake_transport: FakeTransport,
+) -> None:
+    """0 and 11 are outside the device's 1-10 menu range."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    await c.start()
+    with pytest.raises(ValueError, match="1-10"):
+        await c.set_fan_speed(11)
+    with pytest.raises(ValueError, match="1-10"):
+        await c.set_fan_speed(0)
     await c.stop()
 
 
