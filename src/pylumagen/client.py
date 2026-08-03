@@ -102,6 +102,16 @@ class LumagenClient:
     # it without code changes.
     REFRESH_TICKS: tuple[float, ...] = ()
 
+    FULL_STATUS_WAIT = 2.0
+    """Seconds allowed for the ``!I25`` reply once the device is known to talk.
+
+    The reply is a ~25-field line — roughly 100 ms of wire time at 9600 baud,
+    plus device processing, plus (on an ESPHome bridge) a network hop and up
+    to one firmware loop iteration. Generous on purpose: this only costs the
+    full window when Full v5 genuinely doesn't answer, and being stingy here
+    means the pre-v5 warning fires on healthy devices.
+    """
+
     def __init__(
         self,
         transport: _TransportLike,
@@ -538,26 +548,35 @@ class LumagenClient:
                 return
 
             # Wait for !S01 to confirm the Lumagen actually received our queries.
-            deadline = asyncio.get_running_loop().time() + retry_interval
-            while asyncio.get_running_loop().time() < deadline:
-                if self._protocol.state.model is not None:
+            if not await self._wait_for(
+                lambda: self._protocol.state.model is not None, retry_interval
+            ):
+                if attempt < max_retries - 1:
                     _LOGGER.debug(
-                        "Lumagen startup handshake succeeded on attempt %d", attempt + 1
+                        "Lumagen startup attempt %d/%d got no response, retrying",
+                        attempt + 1,
+                        max_retries,
                     )
-                    # The Full v5 push doesn't carry sharpness / game mode /
-                    # auto aspect / HDR-mapping state — pull those once now so
-                    # entities don't sit at "unknown" until the first poll.
-                    await self._query_secondary_status()
-                    self._warn_if_no_full_status()
-                    return
-                await asyncio.sleep(0.2)
+                continue
 
-            if attempt < max_retries - 1:
-                _LOGGER.debug(
-                    "Lumagen startup attempt %d/%d got no response, retrying",
-                    attempt + 1,
-                    max_retries,
-                )
+            _LOGGER.debug(
+                "Lumagen startup handshake succeeded on attempt %d", attempt + 1
+            )
+            # ZQI25 went out moments ago and its reply cannot have arrived yet
+            # — !S01 is a much shorter line and beats it back every time. Give
+            # the status reply its own window before judging v5 support, or the
+            # check below races it and warns on a perfectly healthy device.
+            got_status = await self._wait_for(
+                lambda: bool(self._protocol.state.full_status_raw),
+                self.FULL_STATUS_WAIT,
+            )
+            # The Full v5 push doesn't carry sharpness / game mode / auto
+            # aspect / HDR-mapping state — pull those once now so entities
+            # don't sit at "unknown" until the first poll.
+            await self._query_secondary_status()
+            if not got_status:
+                self._warn_no_full_status()
+            return
 
         _LOGGER.warning(
             "Lumagen startup handshake: no response after %d attempts "
@@ -566,29 +585,63 @@ class LumagenClient:
             max_retries * retry_interval,
         )
 
-    def _warn_if_no_full_status(self) -> None:
-        """Warn when the device identified itself but never answered ``ZQI25``.
+    async def _wait_for(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float,
+        *,
+        interval: float = 0.1,
+    ) -> bool:
+        """Poll ``predicate`` until it's true or ``timeout`` elapses.
 
-        Full v5 is this library's supported floor, and a firmware that
-        predates it doesn't fail loudly — it returns an empty payload, so
-        every status field would just stay ``None`` and the integration
-        would look broken for no visible reason. Reaching here means
-        ``!S01`` arrived (so the link is fine and the device is talking),
-        which makes a missing ``!I25`` a strong signal rather than a guess.
-
-        Only a log line: a slow first response would produce a spurious
-        warning, and the next poll cycle will fill the state in anyway.
-        Don't promote this to an exception.
+        Returns whether it came true. Deliberately a private poller rather
+        than a future/event: the protocol layer is synchronous and has no
+        notion of waiters, and startup is the only caller. If more callers
+        appear, promote this to a public ``wait_for_state`` with real waiter
+        registration instead of scattering polls.
         """
-        if self._protocol.state.full_status_raw is not None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            if predicate():
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(interval)
+
+    def _warn_no_full_status(self) -> None:
+        """Warn that the device identified itself but never reported status.
+
+        Full v5 is this library's supported floor and a firmware predating it
+        doesn't fail loudly — per the note in :mod:`pylumagen.protocol`, any
+        syntactically valid ``ZQ`` code is answered by echoing the code with
+        an **empty** payload. So the signal is an absent *or blank* status
+        payload, not merely a missing line; the caller's predicate tests
+        truthiness rather than ``is not None`` for exactly that reason.
+
+        Only ever a log line — never promote this to an exception. Reaching
+        here means ``!S01`` arrived, so the link is healthy and the device is
+        talking; the integration still works, it just can't populate the
+        signal-path sensors.
+        """
+        state = self._protocol.state
+        if state.power_on is False:
+            # A Lumagen in standby has no signal to report, so silence here
+            # says nothing about firmware support. ZQS02 ran earlier in the
+            # handshake, so power_on is known by now.
+            _LOGGER.debug(
+                "No status payload during startup, but the Lumagen reports "
+                "standby — not treating that as missing Full v5 support"
+            )
             return
         _LOGGER.warning(
-            "Lumagen %s answered ZQS01 but not ZQI25 (Full v5 status). This "
-            "library requires firmware with Full v5 support; on older "
-            "firmware the status sensors will stay unknown. If the device is "
-            "current, this may just be a slow first response — check whether "
-            "status fields populate after the next poll.",
-            self._protocol.state.model,
+            "Lumagen %s answered ZQS01 but returned no Full v5 status within "
+            "%.0fs of ZQI25. This library requires firmware with Full v5 "
+            "support; without it the signal sensors (resolution, aspect, "
+            "colorspace, HDR) stay unknown. Updating the Lumagen's firmware "
+            "is the fix.",
+            state.model,
+            self.FULL_STATUS_WAIT,
         )
 
     async def _refresh_after_command(self) -> None:
