@@ -43,11 +43,29 @@ is the argument against "just match HA's pin": whatever we wrote would be
 wrong by the next release, which is why the dependency is dropped entirely
 rather than pinned.
 
-Note `serialx` is the same shape of risk and *is* still a direct dependency
-(it has to be — it's the transport). Our `>=1.7` happens to resolve to
-HA 2026.7.4's `==1.8.2` today, by luck rather than design. If a future
-serialx release breaks that coincidence, expect the same class of failure;
-serialx also ships a compiled extension (`_serialx_rust.abi3.so`).
+#### `serialx` is a different case — the floor is guaranteed
+
+serialx has the same superficial shape (HA pins it exactly, and it ships a
+compiled extension, `_serialx_rust.abi3.so`), and unlike `aioesphomeapi` it
+can't be dropped — it's the transport. But the exposure is narrower than it
+looks, and the safe half is by design rather than coincidence:
+
+- **Floor — guaranteed.** `ha-lumagen`'s `hacs.json` sets a minimum HA of
+  `2026.5.0`, and that release pins `serialx==1.7.1`. So every supported HA
+  already ships a serialx satisfying our `>=1.7`, and pip never has to
+  *upgrade* serialx on our account. Raising the HACS minimum can only raise
+  HA's serialx, never lower it — so this can't regress.
+- **Ceiling — unbounded, currently inert.** `>=1.7` has no upper bound, so
+  nothing in our metadata prevents a resolver installing *above* HA's exact
+  pin. Today nothing can: `1.8.2` is simultaneously HA 2026.7.4's pin and the
+  newest release on PyPI, so there is nothing higher to install. That half is
+  circumstantial and changes the day serialx 1.9 ships before HA adopts it.
+
+Leaving it unbounded is deliberate. Capping to `<2` buys nothing (it still
+permits 1.9 over 1.8.2), and pinning exactly would recreate the same drift
+problem that made us drop `aioesphomeapi` in the first place. The residual
+window — a serialx release HA hasn't picked up yet — is small, since HA
+tracks it closely (2026.5 → 1.7.1, 2026.7 → 1.8.2).
 
 Dev (in the `dev` group of `pyproject.toml`):
 - `pytest >= 8`, `pytest-asyncio >= 0.24`, `pytest-cov >= 5`
