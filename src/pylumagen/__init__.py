@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pylumagen.client import LumagenClient
-from pylumagen.commands import Aspect, Input, Memory
+from pylumagen.commands import Aspect, Input, Memory, Misc, Navigation, Power
 from pylumagen.exceptions import (
     LumagenCommandError,
     LumagenConnectionError,
     LumagenError,
-    LumagenTimeoutError,
 )
 from pylumagen.state import (
     Colorspace,
@@ -33,11 +32,13 @@ __all__ = [
     "LumagenConnectionError",
     "LumagenError",
     "LumagenState",
-    "LumagenTimeoutError",
     "LumagenTransport",
     "Memory",
+    "Misc",
+    "Navigation",
+    "Power",
     "SharpnessSensitivity",
     "SourceMode",
 ]
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"

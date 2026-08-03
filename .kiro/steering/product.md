@@ -32,6 +32,6 @@ Re-exported from the package root (`pylumagen.__init__`):
 - Client + transport: `LumagenClient`, `LumagenTransport`
 - State: `LumagenState`, `Colorspace`, `HdrStatus`, `InputStatus`, `SourceMode`
 - Commands: `Aspect`, `Input`, `Memory`
-- Errors: `LumagenError`, `LumagenConnectionError`, `LumagenCommandError`, `LumagenTimeoutError`
+- Errors: `LumagenError`, `LumagenConnectionError`, `LumagenCommandError`
 
 These names are the API contract — renaming or removing one is a breaking change.

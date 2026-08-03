@@ -1,30 +1,30 @@
 """High-level Lumagen client.
 
-Composes a :class:`~pylumagen.transport.base.LumagenTransport` with a
+Composes a :class:`~pylumagen.transport.LumagenTransport` with a
 :class:`~pylumagen.protocol.LumagenProtocol` and exposes the commands a
 typical consumer (the ``ha-lumagen`` HA integration, tests, scripts)
 needs. Implements the startup handshake (``ZE2`` + initial status
 queries) and runs a background poll loop so unsolicited reports aren't
 the only way to stay in sync.
 
-When attaching to the ESPHome bridge, FTDI re-enumeration is fast — on
-the order of 33 ms from "Open device" to "Baud 9600 set" in the
-firmware's own logs. The startup handshake is built around two short
-retries (2 attempts at 1.5 s apart) rather than a long up-front wait,
-because in steady-state operation the first attempt almost always
-succeeds and the retry only matters during a cold ESP boot.
+The startup handshake is built around two short retries (2 attempts at
+1.5 s apart) rather than a long up-front wait: the RS-232 link is always
+up as soon as the transport connects, so in steady-state operation the
+first attempt succeeds and the retry only matters when we attach while
+the bridge is still booting.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
 
 from pylumagen.commands import (
     ECHO_OFF_WITH_STATUS,
+    Power,
     Query,
     fan_speed_command,
     game_mode_command,
@@ -34,9 +34,13 @@ from pylumagen.commands import (
     sharpness_command,
     subtitle_shift_command,
 )
-from pylumagen.exceptions import LumagenConnectionError, LumagenError
+from pylumagen.exceptions import (
+    LumagenCommandError,
+    LumagenConnectionError,
+    LumagenError,
+)
 from pylumagen.protocol import LumagenProtocol
-from pylumagen.state import LumagenState
+from pylumagen.state import HdrGammaMode, LumagenState, SharpnessSensitivity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,10 +67,13 @@ class _TransportLike(Protocol):
 
 
 StateListener = Callable[[LumagenState, tuple[str, ...]], None]
-"""Synchronous listener. Called inline from the protocol layer."""
+"""Synchronous listener. Called inline from the protocol layer.
 
-AsyncStateListener = Callable[[LumagenState, tuple[str, ...]], Awaitable[None]]
-"""Async listener. Scheduled as a task when state changes."""
+Listeners are called from the transport's data callback, so they must not
+block or await. A consumer needing async work should schedule it itself —
+HA's ``async_set_updated_data`` is the model: cheap, synchronous, and it
+hands off to the event loop on its own terms.
+"""
 
 
 class LumagenClient:
@@ -125,8 +132,6 @@ class LumagenClient:
         self._stale_timeout = stale_timeout
         self._protocol = LumagenProtocol(self._on_protocol_update)
         self._listeners: list[StateListener] = []
-        self._async_listeners: list[AsyncStateListener] = []
-        self._listener_tasks: set[asyncio.Task[None]] = set()
         self._poll_task: asyncio.Task[None] | None = None
         self._refresh_task: asyncio.Task[None] | None = None
         self._started = False
@@ -218,14 +223,6 @@ class LumagenClient:
                 self._listeners.remove(listener)
         return _unsubscribe
 
-    def subscribe_async(self, listener: AsyncStateListener) -> Callable[[], None]:
-        """Register an async listener. Scheduled as a task per update."""
-        self._async_listeners.append(listener)
-        def _unsubscribe() -> None:
-            with suppress(ValueError):
-                self._async_listeners.remove(listener)
-        return _unsubscribe
-
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
@@ -266,17 +263,14 @@ class LumagenClient:
             self.request_refresh()
 
     async def power_on(self) -> None:
-        await self.send_command("%")
+        await self.send_command(Power.ON)
 
     async def standby(self) -> None:
-        await self.send_command("$")
+        await self.send_command(Power.STANDBY)
 
     async def set_input(self, n: int) -> None:
         """Select input ``n`` (1-19)."""
         await self.send_command(input_command(n))
-
-    async def query_alive(self) -> None:
-        await self.send_command(Query.ALIVE.value)
 
     async def query_device_info(self) -> None:
         await self.send_command(Query.DEVICE_INFO.value)
@@ -288,19 +282,21 @@ class LumagenClient:
         await self.send_command(Query.INPUT_INFO.value)
 
     async def query_full_status(self) -> None:
-        """Send ``ZQI25`` (Full v5).
+        """Send ``ZQI25`` (Full v5) — the only status poll this library issues.
 
-        The device responds with ``!I25,…`` regardless of whether
-        unsolicited reporting is set to v4 or v5 — older queries and
-        newer queries are independent. Calling this against a firmware
-        that predates v5 will silently get nothing back; in that case use
-        :meth:`query_full_status_v4` instead.
+        Full v5 is the supported floor. A firmware old enough not to know
+        ``ZQI25`` answers with an empty payload (see the note in
+        :mod:`pylumagen.protocol` — a response prefix does not imply
+        support), so on such a device every status field would simply stay
+        ``None``; :meth:`_send_startup_sequence` logs a warning naming the
+        requirement rather than letting that look like a wiring fault.
+
+        The ``!I21``-``!I24`` parser branches are deliberately kept: they
+        cost nothing and a device whose *reporting* menu is still set to
+        Full v4 pushes ``!I24`` unsolicited even though we poll v5. Only
+        the v4 *query* was removed.
         """
         await self.send_command(Query.FULL_STATUS_V5.value)
-
-    async def query_full_status_v4(self) -> None:
-        """Send ``ZQI24`` (Full v4) for older firmwares that don't know v5."""
-        await self.send_command(Query.FULL_STATUS.value)
 
     async def query_sharpness(self) -> None:
         """Send ``ZQI30`` and update :attr:`state.sharpness_*`."""
@@ -377,9 +373,15 @@ class LumagenClient:
         without ``ZQS1`` support) are simply left unset — this never raises on
         a missing response, only on an invalid ``memory`` argument.
         """
+        # Note: this is NOT the same vocabulary as the Memory enum. Memory
+        # holds the lowercase memory-*recall* commands (``a``-``d``); the
+        # label query wants an uppercase letter inside ZQS1XY. Keep them
+        # separate — coercing through Memory here would send the wrong byte.
         memory = memory.upper()
         if memory not in ("A", "B", "C", "D"):
-            raise ValueError(f"input-label memory must be 'A'-'D', got {memory!r}")
+            raise LumagenCommandError(
+                f"input-label memory must be 'A'-'D', got {memory!r}"
+            )
         for input_number in range(1, 9):
             self._protocol.expect_input_label(input_number)
             # ZQS1XY: X = memory letter, Y = input - 1 (so '0' for input 1).
@@ -391,7 +393,7 @@ class LumagenClient:
         *,
         enabled: bool,
         level: int,
-        sensitivity: str = "N",
+        sensitivity: SharpnessSensitivity = SharpnessSensitivity.NORMAL,
     ) -> None:
         """Set sharpness via ``ZY521ELS`` and re-query so state catches up.
 
@@ -449,15 +451,16 @@ class LumagenClient:
         await self.query_auto_aspect()
 
     async def set_hdr_intensity_mapping(
-        self, *, display_max_nits: int, gamma_mode: str = "A"
+        self, *, display_max_nits: int, gamma_mode: HdrGammaMode = HdrGammaMode.AUTO
     ) -> None:
         """Set the active CMS's HDR mapping target via ``ZY417XXXXXG``.
 
         :param display_max_nits: 0 to disable HDR mapping, or 50-10000 to
             set the display's peak luminance (the target the Lumagen tone-
             maps toward).
-        :param gamma_mode: ``A`` (auto, recommended), ``H`` (force HDR
-            gamma), or ``S`` (force SDR gamma).
+        :param gamma_mode: :class:`~pylumagen.state.HdrGammaMode` —
+            ``AUTO`` (recommended), ``HDR`` (force HDR gamma), or ``SDR``
+            (force SDR gamma).
 
         There's no documented query that returns the active mapping
         values, so this is fire-and-forget — the integration tracks the
@@ -509,14 +512,12 @@ class LumagenClient:
     async def _send_startup_sequence(self) -> None:
         """ZE2 echo-off, then initial queries with retry.
 
-        Empirically the ESP's USB-UART channel re-initialises in tens of
-        milliseconds (see ESP logs: 33ms from "Open device" to "Baud
-        9600 set"). Two attempts at 1.5 seconds apart is plenty of
-        headroom — the first attempt almost always succeeds. The retry
-        only matters when we attach during a cold ESP boot before the
-        FTDI has been seen at all, which is rare in practice because
-        ha-lumagen's coordinator setup waits for the esphome integration
-        first.
+        Two attempts at 1.5 seconds apart is plenty of headroom — the
+        RS-232 link carries no enumeration step, so once the transport is
+        connected the first attempt almost always succeeds. The retry only
+        matters when we attach while the ESPHome bridge is still coming up,
+        which is rare in practice because ha-lumagen's coordinator setup
+        waits for the esphome integration first.
         """
         max_retries = 2
         retry_interval = 1.5  # seconds between attempts
@@ -547,6 +548,7 @@ class LumagenClient:
                     # auto aspect / HDR-mapping state — pull those once now so
                     # entities don't sit at "unknown" until the first poll.
                     await self._query_secondary_status()
+                    self._warn_if_no_full_status()
                     return
                 await asyncio.sleep(0.2)
 
@@ -562,6 +564,31 @@ class LumagenClient:
             "(%.0fs total). The poll loop will continue trying.",
             max_retries,
             max_retries * retry_interval,
+        )
+
+    def _warn_if_no_full_status(self) -> None:
+        """Warn when the device identified itself but never answered ``ZQI25``.
+
+        Full v5 is this library's supported floor, and a firmware that
+        predates it doesn't fail loudly — it returns an empty payload, so
+        every status field would just stay ``None`` and the integration
+        would look broken for no visible reason. Reaching here means
+        ``!S01`` arrived (so the link is fine and the device is talking),
+        which makes a missing ``!I25`` a strong signal rather than a guess.
+
+        Only a log line: a slow first response would produce a spurious
+        warning, and the next poll cycle will fill the state in anyway.
+        Don't promote this to an exception.
+        """
+        if self._protocol.state.full_status_raw is not None:
+            return
+        _LOGGER.warning(
+            "Lumagen %s answered ZQS01 but not ZQI25 (Full v5 status). This "
+            "library requires firmware with Full v5 support; on older "
+            "firmware the status sensors will stay unknown. If the device is "
+            "current, this may just be a slow first response — check whether "
+            "status fields populate after the next poll.",
+            self._protocol.state.model,
         )
 
     async def _refresh_after_command(self) -> None:
@@ -599,19 +626,19 @@ class LumagenClient:
              coordinator flags entities unavailable in HA.
           2. Force a full transport disconnect + reconnect cycle.
 
-        The reconnect is required because of an ESP-side quirk: when the
-        USB cable is hot-unplugged and re-plugged, the ESP's serial_proxy
-        forgets to forward incoming bytes to existing subscribers even
-        though writes still work and the underlying UART channel has been
-        reinitialized. A fresh serialx connection triggers a fresh
-        subscription on the ESP, which picks up where the old one failed.
+        The reconnect exists because a serial_proxy subscription can go
+        half-open: writes still succeed and the ESP's UART keeps working,
+        but inbound bytes stop reaching the existing subscriber, and the
+        only recovery is a fresh subscription. Reconnecting the transport
+        is functionally identical to reloading the integration from the
+        ESP's perspective, without the entity churn.
 
-        Validated empirically: in direct ESP-log testing (with
-        ``usb_uart_ftdi.debug: true``), writes-from-HA and reads-from-
-        Lumagen both show up after a USB hot-plug, but HA entities stay
-        unavailable until the integration is reloaded. A transport
-        reconnect is functionally identical to an integration reload from
-        the ESP's perspective.
+        Caveat on the evidence: this was diagnosed on the retired USB/FTDI
+        bridge, where a cable hot-plug reliably reproduced it. It has not
+        been reproduced on the current RS-232 path, which has no
+        enumeration step to lose. The recovery is cheap and idempotent so
+        it stays, but treat the trigger as unverified for this hardware —
+        don't cite it as established behavior for RS-232.
         """
         p_iv = self._power_poll_interval
         s_iv = self._status_poll_interval
@@ -687,23 +714,3 @@ class LumagenClient:
                 _LOGGER.exception("Sync state listener raised; dropping it")
                 with suppress(ValueError):
                     self._listeners.remove(listener)
-        for async_listener in list(self._async_listeners):
-            task = asyncio.create_task(
-                self._run_async_listener(async_listener, state, codes),
-                name="pylumagen-listener",
-            )
-            self._listener_tasks.add(task)
-            task.add_done_callback(self._listener_tasks.discard)
-
-    async def _run_async_listener(
-        self,
-        listener: AsyncStateListener,
-        state: LumagenState,
-        codes: tuple[str, ...],
-    ) -> None:
-        try:
-            await listener(state, codes)
-        except Exception:
-            _LOGGER.exception("Async state listener raised; dropping it")
-            with suppress(ValueError):
-                self._async_listeners.remove(listener)

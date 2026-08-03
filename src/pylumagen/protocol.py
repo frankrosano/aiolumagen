@@ -16,8 +16,13 @@ Key invariants (from the old C++ comments, confirmed against captures):
 * Some lines arrive without a final newline before the next line's prefix
   (rare; happens when the Lumagen coalesces unsolicited reports). We don't
   try to handle that — we trust the boundary is a newline.
-* Known response codes: S00, S01, S02, I00, I01, I21, I22, I23, I24, I25,
-  O01. Unknown codes are logged at DEBUG and ignored.
+* Handled response codes: S00, S01, S02, S1A-S1D, I00, I21, I22, I23, I24,
+  I25, I30, I50, I52, I53, I54, O01. Unknown codes are logged at DEBUG and
+  ignored. ``I01`` (input video format) was handled at one point but is no
+  longer: nothing sends ``ZQI01``, so the branch was unreachable and its
+  raw payload had no consumer. An unsolicited ``!I01`` now surfaces as an
+  unhandled-code DEBUG line, which is more useful than silently stashing a
+  string nobody reads.
 * **A response prefix does not imply the query is supported.** The device
   answers *any* syntactically valid ``ZQ`` code by echoing the matching
   code with an empty payload — ``ZQI99`` returns ``!I99,`` exactly like
@@ -242,8 +247,6 @@ class LumagenProtocol:
             pending.input_labels = {**self._state.input_labels, n: data}
         elif code == "I00":
             self._handle_i00(data, pending)
-        elif code == "I01":
-            pending.input_video_raw = data
         elif code == "I24":
             pending.full_status_raw = data
             self._apply_i24(data, pending)
@@ -297,13 +300,31 @@ class LumagenProtocol:
 
     @staticmethod
     def _handle_s01(data: str, state: LumagenState) -> None:
-        """!S01 = ``<model>,<firmware>,<serial>``."""
+        """!S01 = ``<model name>,<software rev>,<model number>,<serial>``.
+
+        Four fields, per Tip0011's ``ZQS01`` entry (its own example is
+        ``!S01,RadianceXD,102308,1009,745``, noting XD's model number as
+        1009 and XE's as 1010). A Radiance Pro answers e.g.
+        ``!S01,RadiancePro,030225,1018,000000`` — software revision is an
+        ``MMDDYY`` date code, and the serial may legitimately read as all
+        zeros.
+
+        This previously split with ``maxsplit=2`` against a docstring that
+        claimed three fields, which silently glued the model number and
+        serial into one discarded string. Fields beyond the fourth (if a
+        future firmware adds any) are ignored here but remain visible in
+        :attr:`~pylumagen.state.LumagenState.device_info_raw`.
+        """
         state.device_info_raw = data
-        parts = data.split(",", 2)
+        parts = data.split(",")
         if len(parts) >= 1:
             state.model = parts[0]
         if len(parts) >= 2:
             state.firmware = parts[1]
+        if len(parts) >= 3:
+            state.model_number = parts[2]
+        if len(parts) >= 4:
+            state.serial = parts[3]
 
     @staticmethod
     def _handle_i00(data: str, state: LumagenState) -> None:

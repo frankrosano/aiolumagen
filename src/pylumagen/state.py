@@ -103,8 +103,32 @@ class LumagenState:
 
     # --- Device info (from !S01) ---
     model: str | None = None
+    """Model *name*, e.g. ``RadiancePro``. Identical across the product line."""
+
     firmware: str | None = None
+    """Software revision as an ``MMDDYY`` date code, e.g. ``030225``."""
+
+    model_number: str | None = None
+    """Manufacturer's model *number*, e.g. ``1018``.
+
+    Unlike :attr:`model` this distinguishes hardware within the line —
+    Tip0011 gives Radiance XD as 1009 and XE as 1010. There's no published
+    number-to-name table beyond those, so treat it as an opaque identifier.
+    """
+
+    serial: str | None = None
+    """Serial number as reported by ``!S01``, verbatim.
+
+    **Not reliable as a unique identifier.** Some units report all zeros
+    (``000000``); the value is passed through unchanged rather than
+    normalised to ``None`` so consumers can tell "device said zeros" from
+    "not yet observed". Check for a non-zero value before using it as
+    identity.
+    """
+
     device_info_raw: str | None = None
+    """Whole ``!S01`` payload — kept so an unexpected field layout stays
+    diagnosable even though the fields above are parsed out of it."""
 
     # --- Input info (from !I00) ---
     current_input: str | None = None
@@ -122,9 +146,6 @@ class LumagenState:
     ``LumagenProtocol.expect_input_label``). Labels are per (input, memory);
     this map holds one memory's worth (memory A by default).
     """
-
-    # --- Input video format (from !I01) ---
-    input_video_raw: str | None = None
 
     # --- Full status (from !I24 / !I21-I23) ---
     input_status: InputStatus | None = None

@@ -59,24 +59,31 @@ Fields remain `None` until the corresponding response has been seen at least onc
 
 ## Lumagen-side prerequisite: enabling unsolicited reporting
 
-For real-time status pushes (rather than just 60 s polling), configure the Lumagen to emit reports when state changes. **Full v5** is recommended on current firmware — it pushes power transitions and memory swaps in addition to v4's coverage, so HA entities update without any post-command polling:
+For real-time status pushes (rather than just polling), configure the Lumagen to emit reports when state changes. **Full v5** pushes power transitions and memory swaps in addition to v4's coverage, so HA entities update without any post-command polling:
 
 1. On the Lumagen remote or OSD, press `MENU`.
 2. Navigate: **Other → I/O Setup → RS-232 Setup → Report mode changes**.
-3. Cycle to **Full v5** (or **Full v4** on older firmware).
+3. Cycle to **Full v5**.
 4. Press `OK` to confirm, then `SAVE` to persist.
 
-This writes to the Lumagen's NVRAM and persists across reboots. Without it, the library still works — it just relies on its 60 s polling loop to catch state changes.
+This writes to the Lumagen's NVRAM and persists across reboots. Without it, the library still works — it just relies on its polling loop to catch state changes.
+
+If the reporting mode is left at **Full v4**, pushes still parse (the `!I21`–`!I24` handlers are retained) — you simply don't get power and memory changes in real time.
+
+## Firmware requirement: Full v5
+
+`ZQI25` (Full v5 status) is the only status query this library issues, so firmware old enough not to implement it is **not supported**. Such a device won't error: per Lumagen's protocol, any syntactically valid `ZQ` code is answered with an empty payload, so status fields would silently stay unset. The startup handshake detects this — a device that answers `ZQS01` but never `ZQI25` gets a warning naming the requirement — but the fix is a firmware update.
 
 ## Exception mapping (for Home Assistant integrators)
 
 | Library exception | Suggested HA mapping |
 |---|---|
 | `LumagenConnectionError` | `ConfigEntryNotReady` from `async_setup_entry`, or mark device unavailable from the coordinator |
-| `LumagenTimeoutError` | `UpdateFailed` from `_async_update_data` |
-| `LumagenCommandError` | Log a warning; don't surface to the user |
+| `LumagenCommandError` | Log a warning; don't surface to the user. Also subclasses `ValueError`, so existing `except ValueError` handlers still catch it |
 
 No `LumagenAuthError` — the Lumagen itself has no authentication. Any transport-layer auth errors (e.g. wrong ESPHome PSK) surface as `LumagenConnectionError` via serialx.
+
+No timeout exception either: nothing here is request/response, so there's no outstanding request for a deadline to apply to. Impose your own with `asyncio.timeout` and catch the builtin `TimeoutError` (this is what `ha-lumagen`'s config flow does while waiting for `!S01`).
 
 ## Development
 

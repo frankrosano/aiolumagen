@@ -12,7 +12,6 @@ pylumagen/
 │       ├── client.py           # LumagenClient — composes protocol + transport, runs handshake + poll loop
 │       ├── protocol.py         # LumagenProtocol — pure-sync line buffer, ! scan, CSV split, state merge
 │       ├── transport.py        # LumagenTransport — thin wrapper over serialx
-│       ├── transport/          # transport submodule (if/when split out)
 │       ├── state.py            # LumagenState dataclass + Colorspace/HdrStatus/InputStatus/SourceMode enums
 │       ├── commands.py         # Aspect, Input, Memory enums + command-formatting helpers
 │       └── exceptions.py       # LumagenError hierarchy

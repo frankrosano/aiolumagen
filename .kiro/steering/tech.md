@@ -57,14 +57,16 @@ uv run python examples/via_url.py 'esphome://10.0.0.42:6053/?port_name=Lumagen&k
 
 - 9600 8N1 ASCII; commands 1–6 chars, no CR terminator; queries start with `ZQ`; responses start with `!`.
 - The Lumagen **may echo the sent command** as a prefix on the response line. The protocol layer must scan for `!` rather than assuming it's at position 0.
-- Unsolicited reports require user setup on the device: **Menu → Other → I/O Setup → RS-232 Setup → Report mode changes → Full v5 → Save** (or Full v4 on older firmware). Without this, the library still works via polling — keep that path correct.
+- Unsolicited reports require user setup on the device: **Menu → Other → I/O Setup → RS-232 Setup → Report mode changes → Full v5 → Save**. Without this, the library still works via polling — keep that path correct. A device left on Full v4 also works: the `!I21`–`!I24` parsers are retained, so pushes still land, minus power/memory in real time.
+- **Full v5 is the supported firmware floor.** `ZQI25` is the only status query issued; there is deliberately no `ZQI24` query. Don't add one back — if pre-v5 support is ever needed, make it an explicit client option rather than a probe, because the device answers any valid `ZQ` code with an empty payload so "is v5 supported" can't be reliably detected at runtime.
 
 ## Exception Mapping (contract with `ha-lumagen`)
 
 | Library exception | HA mapping (in the integration) |
 |---|---|
 | `LumagenConnectionError` | `ConfigEntryNotReady`, or device unavailable from the coordinator |
-| `LumagenTimeoutError` | `UpdateFailed` from `_async_update_data` |
-| `LumagenCommandError` | Log a warning; don't surface to the user |
+| `LumagenCommandError` | Log a warning; don't surface to the user. Also subclasses `ValueError` |
 
 There is no `LumagenAuthError` — the Lumagen has no auth. Transport-layer auth failures (e.g. wrong ESPHome PSK) surface as `LumagenConnectionError` via serialx.
+
+There is no timeout exception either. Nothing in the library is request/response, so there's no outstanding request a deadline could apply to; consumers impose their own with `asyncio.timeout` and catch the builtin `TimeoutError`. Don't re-add one unless the library grows a real `wait_for_state` waiter.

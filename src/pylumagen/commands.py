@@ -4,11 +4,28 @@ The Lumagen speaks short ASCII commands over 9600 8N1. Most commands are a
 single character with no terminator; a handful are documented to need a
 carriage return. The constants in this module mirror the command tables in
 ``References/Tip0011_RS232CommandInterface_111023.pdf``.
+
+**This module is the single source of truth for Lumagen wire commands.**
+Consumers — including ``ha-lumagen``'s button/select/switch/remote tables —
+must reference these members rather than re-declaring the literals. The
+table is hostile to hand-transcription: 29 of the commands are a single
+opaque character, and four pairs differ only by letter case while meaning
+unrelated things (``v`` down vs ``V`` auto-aspect-off, ``w`` 16:9 vs ``W``
+2.35, ``s`` OSD-off vs ``S`` save, ``g`` OSD-on vs ``G`` 2.40). A
+mistyped literal is a valid command for a different operation and nothing
+will reject it; a mistyped enum member is an ``AttributeError`` at import.
+
+Every enum here is a :class:`~enum.StrEnum`, so members are ``str``
+instances and can be handed straight to
+:meth:`~pylumagen.client.LumagenClient.send_command` without ``.value``.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+
+from pylumagen.exceptions import LumagenCommandError
+from pylumagen.state import HdrGammaMode, SharpnessSensitivity
 
 
 class Input(StrEnum):
@@ -84,14 +101,23 @@ class Misc(StrEnum):
 
 
 class Query(StrEnum):
-    """Query commands. All expect a ``!``-prefixed response."""
+    """Query commands. All expect a ``!``-prefixed response.
 
-    ALIVE = "ZQS00"
+    Every member here has a sending method on
+    :class:`~pylumagen.client.LumagenClient`. Don't add one speculatively —
+    a ``Query`` nobody sends means a parser branch nobody can reach.
+    ``ZQS00`` (alive) and ``ZQI01`` (input video format) were removed for
+    exactly that reason: byte-level liveness in
+    ``LumagenClient._on_bytes_received`` supersedes the former, and nothing
+    ever consumed the latter.
+    """
+
     DEVICE_INFO = "ZQS01"
     POWER = "ZQS02"
     INPUT_INFO = "ZQI00"
-    INPUT_VIDEO = "ZQI01"
-    FULL_STATUS = "ZQI24"
+    # No ZQI24 (Full v4) query: v5 is the supported floor. The !I21-!I24
+    # *parsers* stay, because a device whose reporting menu is still set to
+    # Full v4 pushes !I24 unsolicited.
     FULL_STATUS_V5 = "ZQI25"
     SHARPNESS = "ZQI30"
     DISPLAY_REC2020 = "ZQI50"
@@ -110,27 +136,38 @@ ECHO_OFF_WITH_STATUS = "ZE2"
 def input_command(n: int) -> str:
     """Return the command string to select input ``n`` (1-19)."""
     if not 1 <= n <= 19:
-        raise ValueError(f"input must be 1-19, got {n}")
+        raise LumagenCommandError(f"input must be 1-19, got {n}")
     return f"i{n}"
 
 
-def sharpness_command(*, enabled: bool, level: int, sensitivity: str = "N") -> str:
+def sharpness_command(
+    *,
+    enabled: bool,
+    level: int,
+    sensitivity: SharpnessSensitivity = SharpnessSensitivity.NORMAL,
+) -> str:
     """Build a ``ZY521ELS`` sharpness command. Requires CR terminator on send.
 
     :param enabled: ``True`` for ``Y`` (sharpening on), ``False`` for ``N``.
     :param level: Sharpening intensity, 0-7 (7 = strongest).
-    :param sensitivity: ``"H"`` for high, ``"N"`` for normal.
+    :param sensitivity: :class:`~pylumagen.state.SharpnessSensitivity`. A bare
+        ``"H"``/``"N"`` string is still accepted and coerced, so callers that
+        carry the wire letter around keep working.
 
     Per the Lumagen RS-232 doc (Tip0011, ``ZY521ELS<CR>``), this sets both
     horizontal and vertical sharpness to the same level. For independent
     H/V control use ``ZY522`` (not yet wrapped — call via ``send_command``).
     """
     if not 0 <= level <= 7:
-        raise ValueError(f"sharpness level must be 0-7, got {level}")
-    if sensitivity not in ("H", "N"):
-        raise ValueError(f"sharpness sensitivity must be 'H' or 'N', got {sensitivity!r}")
+        raise LumagenCommandError(f"sharpness level must be 0-7, got {level}")
+    try:
+        sens = SharpnessSensitivity(sensitivity)
+    except ValueError:
+        raise LumagenCommandError(
+            f"sharpness sensitivity must be 'H' or 'N', got {sensitivity!r}"
+        ) from None
     e = "Y" if enabled else "N"
-    return f"ZY521{e}{level}{sensitivity}"
+    return f"ZY521{e}{level}{sens.value}"
 
 
 def game_mode_command(enabled: bool) -> str:
@@ -154,7 +191,7 @@ def fan_speed_command(speed: int) -> str:
     Requires CR terminator on send.
     """
     if not 1 <= speed <= 10:
-        raise ValueError(f"fan speed must be 1-10, got {speed}")
+        raise LumagenCommandError(f"fan speed must be 1-10, got {speed}")
     return f"ZY552{speed - 1}"
 
 
@@ -165,7 +202,7 @@ def subtitle_shift_command(level: int) -> str:
     the bundled Tip0011 PDF doesn't document this command explicitly.
     """
     if level not in (0, 1, 2):
-        raise ValueError(f"subtitle shift must be 0, 1, or 2; got {level}")
+        raise LumagenCommandError(f"subtitle shift must be 0, 1, or 2; got {level}")
     return f"ZY553{level}"
 
 
@@ -174,7 +211,9 @@ def reset_auto_aspect_command() -> str:
     return "ZY550"
 
 
-def hdr_intensity_mapping_command(*, display_max_nits: int, gamma_mode: str) -> str:
+def hdr_intensity_mapping_command(
+    *, display_max_nits: int, gamma_mode: HdrGammaMode
+) -> str:
     """Build a ``ZY417XXXXXG`` HDR intensity-mapping command.
 
     Requires a CR terminator on send. Per Tip0011:
@@ -193,12 +232,17 @@ def hdr_intensity_mapping_command(*, display_max_nits: int, gamma_mode: str) -> 
     optimistically).
 
     :param display_max_nits: 0 (disable mapping), or 50-10000 (active).
-    :param gamma_mode: 'A', 'H', or 'S'.
+    :param gamma_mode: :class:`~pylumagen.state.HdrGammaMode`. A bare
+        ``"A"``/``"H"``/``"S"`` string is still accepted and coerced.
     """
     if display_max_nits != 0 and not 50 <= display_max_nits <= 10000:
-        raise ValueError(
+        raise LumagenCommandError(
             f"display_max_nits must be 0 (disable) or 50-10000, got {display_max_nits}"
         )
-    if gamma_mode not in ("A", "H", "S"):
-        raise ValueError(f"gamma_mode must be 'A', 'H', or 'S'; got {gamma_mode!r}")
-    return f"ZY417{display_max_nits:05d}{gamma_mode}"
+    try:
+        gamma = HdrGammaMode(gamma_mode)
+    except ValueError:
+        raise LumagenCommandError(
+            f"gamma_mode must be 'A', 'H', or 'S'; got {gamma_mode!r}"
+        ) from None
+    return f"ZY417{display_max_nits:05d}{gamma.value}"

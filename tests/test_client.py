@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from pylumagen.client import LumagenClient
+from pylumagen.exceptions import LumagenError
 from pylumagen.state import LumagenState
 from tests.conftest import FakeTransport
 
@@ -128,7 +129,7 @@ async def test_send_command_before_start_raises(
         power_poll_interval=None,
         status_poll_interval=None,
     )
-    with pytest.raises(Exception):  # noqa: B017 — LumagenError is what we want
+    with pytest.raises(LumagenError):
         await c.send_command("%")
 
 
