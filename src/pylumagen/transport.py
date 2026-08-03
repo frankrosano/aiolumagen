@@ -9,6 +9,16 @@ open any serial URL scheme serialx supports:
 * ``socket://<host>:<port>`` — raw TCP bridge (e.g. ser2net)
 * anything else serialx grows support for
 
+The ``esphome://`` scheme needs ``aioesphomeapi``, which this package does
+*not* depend on directly — see the note on ``dependencies`` in
+``pyproject.toml``. Inside Home Assistant it's already present; elsewhere,
+install ``pylumagen[esphome]``. serialx registers its platforms
+conditionally, so the other schemes work fine without it — and a missing
+install surfaces as a :class:`~pylumagen.exceptions.LumagenConnectionError`
+from :meth:`connect` naming the extra (serialx's own message for this is
+"No handler registered for URI scheme", which doesn't hint at the cause; see
+:meth:`LumagenTransport._connect_error_message`).
+
 :class:`LumagenTransport` is deliberately thin: it opens the URL, pipes
 inbound bytes to a callback, and exposes :meth:`write`. All Lumagen
 protocol concerns live in :class:`~pylumagen.protocol.LumagenProtocol`.
@@ -22,6 +32,7 @@ keeps the surface small.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 from collections.abc import Callable
 
@@ -87,9 +98,7 @@ class LumagenTransport:
                 baudrate=self.baudrate,
             )
         except Exception as err:
-            raise LumagenConnectionError(
-                f"Could not open {self.url!r}: {err}"
-            ) from err
+            raise LumagenConnectionError(self._connect_error_message(err)) from err
         self._transport = transport
         self._connected = True
 
@@ -105,6 +114,35 @@ class LumagenTransport:
         self._transport.write(data)
 
     # -- Internal plumbing -------------------------------------------------
+
+    def _connect_error_message(self, err: Exception) -> str:
+        """Explain a connect failure, translating the missing-extra case.
+
+        serialx registers its platforms *conditionally*: with ``aioesphomeapi``
+        absent, the ``esphome://`` scheme simply never registers, and the
+        failure surfaces as "No handler registered for URI scheme" rather than
+        an ImportError. That phrasing gives a user no idea what to install, so
+        detect the real cause — an ``esphome://`` URL with the package missing
+        — and say so.
+
+        Checked with :func:`importlib.util.find_spec` rather than a real
+        import: this runs on a failure path and there's no reason to pay for
+        loading a heavyweight compiled package just to prove it exists.
+        """
+        base = f"Could not open {self.url!r}: {err}"
+        if not self.url.lower().startswith("esphome://"):
+            return base
+        if importlib.util.find_spec("aioesphomeapi") is not None:
+            return base
+        return (
+            f"Could not open {self.url!r}: the ESPHome transport needs the "
+            "'aioesphomeapi' package, which isn't installed — so serialx never "
+            "registered the esphome:// scheme, which is what the underlying "
+            f"error ({err}) actually means. Install pylumagen[esphome], or "
+            "inside Home Assistant make sure the ESPHome integration is set "
+            "up; it provides that package, and pylumagen deliberately doesn't "
+            "depend on it so it can't fight Home Assistant's pinned version."
+        )
 
     def _emit(self, data: bytes) -> None:
         if self._on_data is not None and data:

@@ -9,7 +9,17 @@
 ## Dependencies
 
 Runtime:
-- `serialx[esphome] >= 1.7` — universal serial transport (direct, TCP, ESPHome proxy)
+- `serialx >= 1.7` — universal serial transport (direct, TCP, ESPHome proxy)
+
+**Do not add the `[esphome]` extra to the base dependency.** It only pulls
+`aioesphomeapi`, which Home Assistant pins exactly (`==44.21.0` as of HA
+2026.5) for its own esphome integration and installs into the same
+site-packages. A looser range here let the resolver move HA's version;
+because aioesphomeapi is Cython, the rewrite left mismatched `.so` files and
+killed the ESPHome integration. serialx imports it lazily per URL scheme, so
+omitting the extra costs nothing when it's present — and inside HA an
+`esphome://` URL implies the ESPHome integration, which provides it.
+Standalone users opt in with `pip install pylumagen[esphome]`.
 
 Dev (in the `dev` group of `pyproject.toml`):
 - `pytest >= 8`, `pytest-asyncio >= 0.24`, `pytest-cov >= 5`

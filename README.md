@@ -11,6 +11,31 @@ Transport is handled by [`serialx`](https://github.com/puddly/serialx), so pylum
 - Python 3.14+
 - `serialx >= 1.7`
 
+### Installing for `esphome://` URLs
+
+The ESPHome serial-proxy transport additionally needs `aioesphomeapi`, which
+is **not** a direct dependency here:
+
+```bash
+pip install pylumagen[esphome]      # standalone use
+pip install pylumagen               # inside Home Assistant
+```
+
+Home Assistant already ships `aioesphomeapi` — pinned exactly — for its own
+ESPHome integration, and installs custom-integration requirements into the
+same site-packages. If pylumagen also declared it (at a necessarily looser
+range), the resolver could move HA's pinned version out from under the
+running ESPHome integration; because it's a Cython package, that leaves
+mismatched `.so` files behind and breaks it with errors like
+`APIConnection size changed` or `does not export expected C function
+make_noise_packets`. So HA stays the single owner of that pin.
+
+Nothing is lost by the split: serialx imports `aioesphomeapi` lazily per URL
+scheme, so direct-serial and `socket://` URLs never touch it, and an
+`esphome://` URL inside HA implies the ESPHome integration is set up — which
+guarantees the package is there. Outside HA without the extra, `connect()`
+raises `LumagenConnectionError` naming what to install.
+
 ## Quick start
 
 ```python
@@ -88,11 +113,16 @@ No timeout exception either: nothing here is request/response, so there's no out
 ## Development
 
 ```bash
-uv sync                # install deps + dev tools
-uv run pytest          # run tests
-uv run ruff check .    # lint
-uv run mypy src        # type check
+uv sync                      # install deps + dev tools
+uv sync --extra esphome      # ...plus aioesphomeapi, to exercise esphome:// URLs
+uv run pytest                # run tests
+uv run ruff check .          # lint
+uv run mypy src              # type check
 ```
+
+The test suite needs no extras — it drives a fake transport, never a real
+serial port. `--extra esphome` is only for pointing `examples/via_url.py` at
+a live ESPHome bridge.
 
 ## Status
 

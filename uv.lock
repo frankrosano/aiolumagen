@@ -415,9 +415,14 @@ wheels = [
 
 [[package]]
 name = "pylumagen"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
+    { name = "serialx" },
+]
+
+[package.optional-dependencies]
+esphome = [
     { name = "serialx", extra = ["esphome"] },
 ]
 
@@ -431,7 +436,11 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "serialx", extras = ["esphome"], specifier = ">=1.7" }]
+requires-dist = [
+    { name = "serialx", specifier = ">=1.7" },
+    { name = "serialx", extras = ["esphome"], marker = "extra == 'esphome'", specifier = ">=1.7" },
+]
+provides-extras = ["esphome"]
 
 [package.metadata.requires-dev]
 dev = [

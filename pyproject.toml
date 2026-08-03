@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pylumagen"
-version = "0.3.1"
+version = "0.3.2"
 description = "Async Python library for the Lumagen Radiance Pro RS-232 protocol, with direct-serial and ESPHome serial-proxy transports."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -23,8 +23,30 @@ classifiers = [
     "Topic :: Multimedia :: Video",
 ]
 dependencies = [
-    "serialx[esphome]>=1.7",
+    # Deliberately WITHOUT the [esphome] extra. That extra only adds
+    # aioesphomeapi, and serialx imports it lazily (per URL scheme), so
+    # omitting it removes no capability whenever the package is present for
+    # another reason.
+    #
+    # It matters because Home Assistant pins aioesphomeapi exactly for its
+    # own esphome integration (==44.21.0 as of HA 2026.5) and installs
+    # custom-integration requirements into the same site-packages. Declaring
+    # a looser range here (>=44.17.0, no upper bound) for a package we don't
+    # own let the resolver move HA's pinned version, and rewriting a Cython
+    # package's .so files under a running HA leaves a mixed set on disk —
+    # observed as "APIConnection size changed" / "does not export expected C
+    # function make_noise_packets" and a dead ESPHome integration.
+    #
+    # HA already guarantees aioesphomeapi is present whenever it's needed: an
+    # esphome:// URL implies the ESPHome integration, which ships it. Users
+    # outside HA opt in via the `esphome` extra below.
+    "serialx>=1.7",
 ]
+
+[project.optional-dependencies]
+# For consumers outside Home Assistant: pulls in aioesphomeapi so
+# `esphome://` URLs work out of the box. `pip install pylumagen[esphome]`.
+esphome = ["serialx[esphome]>=1.7"]
 
 [project.urls]
 Homepage = "https://github.com/frankrosano/pylumagen"
