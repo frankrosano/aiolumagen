@@ -28,18 +28,27 @@ dependencies = [
     # omitting it removes no capability whenever the package is present for
     # another reason.
     #
-    # It matters because Home Assistant pins aioesphomeapi exactly for its
-    # own esphome integration (==44.21.0 as of HA 2026.5) and installs
-    # custom-integration requirements into the same site-packages. Declaring
-    # a looser range here (>=44.17.0, no upper bound) for a package we don't
-    # own let the resolver move HA's pinned version, and rewriting a Cython
+    # It matters because Home Assistant pins aioesphomeapi *exactly* for its
+    # own esphome integration, and installs custom-integration requirements
+    # into the same site-packages. Any range we declare for a package we don't
+    # own gives the resolver licence to move HA's pin, and rewriting a Cython
     # package's .so files under a running HA leaves a mixed set on disk —
     # observed as "APIConnection size changed" / "does not export expected C
     # function make_noise_packets" and a dead ESPHome integration.
     #
-    # HA already guarantees aioesphomeapi is present whenever it's needed: an
-    # esphome:// URL implies the ESPHome integration, which ships it. Users
-    # outside HA opt in via the `esphome` extra below.
+    # That pin is NOT static; it moves most HA releases. Two observed points:
+    #   HA 2026.5.1 -> aioesphomeapi==44.21.0
+    #   HA 2026.7.4 -> aioesphomeapi==45.3.1
+    # A major version in two minor releases. That drift is precisely why this
+    # can't be solved by matching HA's pin here — any value we wrote would be
+    # wrong by the next release. Read the current one from the horse's mouth:
+    # homeassistant/components/esphome/manifest.json in the target install.
+    #
+    # HA guarantees the package is present anyway: its `usb` integration
+    # imports serialx.platforms.serial_esphome at module scope (via
+    # serial_proxy_stub), so aioesphomeapi is loaded by any install that
+    # brings up `usb` — which ha-lumagen requires. Users outside HA opt in via
+    # the `esphome` extra below.
     "serialx>=1.7",
 ]
 

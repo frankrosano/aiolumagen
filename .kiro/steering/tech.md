@@ -12,19 +12,59 @@ Runtime:
 - `serialx >= 1.7` — universal serial transport (direct, TCP, ESPHome proxy)
 
 **Do not add the `[esphome]` extra to the base dependency.** It only pulls
-`aioesphomeapi`, which Home Assistant pins exactly (`==44.21.0` as of HA
-2026.5) for its own esphome integration and installs into the same
-site-packages. A looser range here let the resolver move HA's version;
-because aioesphomeapi is Cython, the rewrite left mismatched `.so` files and
-killed the ESPHome integration. serialx imports it lazily per URL scheme, so
-omitting the extra costs nothing when it's present — and inside HA an
-`esphome://` URL implies the ESPHome integration, which provides it.
-Standalone users opt in with `pip install pylumagen[esphome]`.
+`aioesphomeapi`, which Home Assistant pins *exactly* for its own esphome
+integration and installs into the same site-packages. Any range we declare
+lets the resolver move HA's pin; because aioesphomeapi is Cython, that
+rewrite leaves mismatched `.so` files and kills the ESPHome integration
+("APIConnection size changed", "does not export expected C function
+make_noise_packets").
+
+Omitting the extra costs nothing. serialx imports the platform lazily by URL
+scheme, and in HA it's guaranteed present regardless: the `usb` integration
+imports `serialx.platforms.serial_esphome` at module scope via
+`serial_proxy_stub`, so any install that brings up `usb` — which
+`ha-lumagen` requires — has already loaded it. Standalone users opt in with
+`pip install pylumagen[esphome]`.
+
+### HA's pins are moving targets — don't hard-code them
+
+Every version below is a snapshot, not a constant. HA bumps these with most
+releases, so treat any number written down here as stale and read the live
+value from `homeassistant/components/<domain>/manifest.json` in the target
+install.
+
+| | HA 2026.5.1 | HA 2026.7.4 |
+|---|---|---|
+| `aioesphomeapi` | `==44.21.0` | `==45.3.1` |
+| `serialx` | `==1.7.1` | `==1.8.2` |
+
+A whole major version of `aioesphomeapi` inside two minor HA releases. This
+is the argument against "just match HA's pin": whatever we wrote would be
+wrong by the next release, which is why the dependency is dropped entirely
+rather than pinned.
+
+Note `serialx` is the same shape of risk and *is* still a direct dependency
+(it has to be — it's the transport). Our `>=1.7` happens to resolve to
+HA 2026.7.4's `==1.8.2` today, by luck rather than design. If a future
+serialx release breaks that coincidence, expect the same class of failure;
+serialx also ships a compiled extension (`_serialx_rust.abi3.so`).
 
 Dev (in the `dev` group of `pyproject.toml`):
 - `pytest >= 8`, `pytest-asyncio >= 0.24`, `pytest-cov >= 5`
 - `ruff >= 0.7` for lint + format
 - `mypy >= 1.11` in **strict** mode
+
+### `uv.lock` is deliberately not tracked
+
+Both repos gitignore it. The dev environment is *meant* to float: this stack
+is developed against whatever HA is current, because that's what the author
+runs in production. A test env that tracks HA's latest surfaces HA
+regressions at the same time they'd bite live, which is the point.
+
+The tradeoff is accepted, not overlooked: a green run isn't reproducible
+months later, and a CI failure may come from an HA bump rather than a code
+change. Don't "fix" this by committing a lock or pinning
+`pytest-homeassistant-custom-component`.
 
 No other runtime deps. Keep it that way unless there's a clear reason — every added dep is a dep `ha-lumagen` will inherit.
 
