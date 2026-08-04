@@ -37,15 +37,15 @@ import asyncio
 import logging
 import sys
 
-from pylumagen import LumagenClient, LumagenTransport
+from aiolumagen import LumagenClient, LumagenTransport
 
-# DEBUG so the pylumagen.protocol RX: lines show up — that's the whole point
+# DEBUG so the aiolumagen.protocol RX: lines show up — that's the whole point
 # of this script. INFO would hide them.
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(name)-22s %(levelname)-7s %(message)s",
 )
-# Quiet down asyncio + serialx — we only care about pylumagen output.
+# Quiet down asyncio + serialx — we only care about aiolumagen output.
 for noisy in ("asyncio", "aioesphomeapi", "serialx"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 

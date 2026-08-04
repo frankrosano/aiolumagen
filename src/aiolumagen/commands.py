@@ -17,22 +17,22 @@ will reject it; a mistyped enum member is an ``AttributeError`` at import.
 
 Every enum here is a :class:`~enum.StrEnum`, so members are ``str``
 instances and can be handed straight to
-:meth:`~pylumagen.client.LumagenClient.send_command` without ``.value``.
+:meth:`~aiolumagen.client.LumagenClient.send_command` without ``.value``.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 
-from pylumagen.exceptions import LumagenCommandError
-from pylumagen.state import HdrGammaMode, SharpnessSensitivity
+from aiolumagen.exceptions import LumagenCommandError
+from aiolumagen.state import HdrGammaMode, SharpnessSensitivity
 
 
 class Input(StrEnum):
     """Direct input-select commands (1-8 buttons).
 
     For inputs 9+ on models that support them, use
-    :meth:`~pylumagen.client.LumagenClient.send_command` with ``iN`` where
+    :meth:`~aiolumagen.client.LumagenClient.send_command` with ``iN`` where
     N is the input number.
     """
 
@@ -104,7 +104,7 @@ class Query(StrEnum):
     """Query commands. All expect a ``!``-prefixed response.
 
     Every member here has a sending method on
-    :class:`~pylumagen.client.LumagenClient`. Don't add one speculatively —
+    :class:`~aiolumagen.client.LumagenClient`. Don't add one speculatively —
     a ``Query`` nobody sends means a parser branch nobody can reach.
     ``ZQS00`` (alive) and ``ZQI01`` (input video format) were removed for
     exactly that reason: byte-level liveness in
@@ -150,7 +150,7 @@ def sharpness_command(
 
     :param enabled: ``True`` for ``Y`` (sharpening on), ``False`` for ``N``.
     :param level: Sharpening intensity, 0-7 (7 = strongest).
-    :param sensitivity: :class:`~pylumagen.state.SharpnessSensitivity`. A bare
+    :param sensitivity: :class:`~aiolumagen.state.SharpnessSensitivity`. A bare
         ``"H"``/``"N"`` string is still accepted and coerced, so callers that
         carry the wire letter around keep working.
 
@@ -232,7 +232,7 @@ def hdr_intensity_mapping_command(
     optimistically).
 
     :param display_max_nits: 0 (disable mapping), or 50-10000 (active).
-    :param gamma_mode: :class:`~pylumagen.state.HdrGammaMode`. A bare
+    :param gamma_mode: :class:`~aiolumagen.state.HdrGammaMode`. A bare
         ``"A"``/``"H"``/``"S"`` string is still accepted and coerced.
     """
     if display_max_nits != 0 and not 50 <= display_max_nits <= 10000:

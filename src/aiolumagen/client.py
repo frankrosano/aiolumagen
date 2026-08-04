@@ -1,7 +1,7 @@
 """High-level Lumagen client.
 
-Composes a :class:`~pylumagen.transport.LumagenTransport` with a
-:class:`~pylumagen.protocol.LumagenProtocol` and exposes the commands a
+Composes a :class:`~aiolumagen.transport.LumagenTransport` with a
+:class:`~aiolumagen.protocol.LumagenProtocol` and exposes the commands a
 typical consumer (the ``ha-lumagen`` HA integration, tests, scripts)
 needs. Implements the startup handshake (``ZE2`` + initial status
 queries) and runs a background poll loop so unsolicited reports aren't
@@ -22,7 +22,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
 
-from pylumagen.commands import (
+from aiolumagen.commands import (
     ECHO_OFF_WITH_STATUS,
     Power,
     Query,
@@ -34,13 +34,13 @@ from pylumagen.commands import (
     sharpness_command,
     subtitle_shift_command,
 )
-from pylumagen.exceptions import (
+from aiolumagen.exceptions import (
     LumagenCommandError,
     LumagenConnectionError,
     LumagenError,
 )
-from pylumagen.protocol import LumagenProtocol
-from pylumagen.state import HdrGammaMode, LumagenState, SharpnessSensitivity
+from aiolumagen.protocol import LumagenProtocol
+from aiolumagen.state import HdrGammaMode, LumagenState, SharpnessSensitivity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ _LOGGER = logging.getLogger(__name__)
 class _TransportLike(Protocol):
     """Minimal transport contract the client depends on.
 
-    Concrete implementations: :class:`pylumagen.transport.LumagenTransport`
+    Concrete implementations: :class:`aiolumagen.transport.LumagenTransport`
     for real connections, and a lightweight in-memory fake in
     ``tests/conftest.py`` for unit tests. The contract is intentionally
     duck-typed — no ABC — because there's only ever one real transport.
@@ -173,7 +173,7 @@ class LumagenClient:
             or self._status_poll_interval is not None
         ):
             self._poll_task = asyncio.create_task(
-                self._poll_loop(), name="pylumagen-poll"
+                self._poll_loop(), name="aiolumagen-poll"
             )
 
     async def stop(self) -> None:
@@ -296,7 +296,7 @@ class LumagenClient:
 
         Full v5 is the supported floor. A firmware old enough not to know
         ``ZQI25`` answers with an empty payload (see the note in
-        :mod:`pylumagen.protocol` — a response prefix does not imply
+        :mod:`aiolumagen.protocol` — a response prefix does not imply
         support), so on such a device every status field would simply stay
         ``None``; :meth:`_send_startup_sequence` logs a warning naming the
         requirement rather than letting that look like a wiring fault.
@@ -426,7 +426,7 @@ class LumagenClient:
 
         ``speed`` is in the device's own units — the number the Lumagen
         shows in its menu. The wire digit is one lower; see
-        :func:`~pylumagen.commands.fan_speed_command` for the evidence.
+        :func:`~aiolumagen.commands.fan_speed_command` for the evidence.
 
         Reverse-engineered from the firmware (see
         ``References/FIRMWARE_REVERSE_ENGINEERING_FINDINGS.md``); not
@@ -438,7 +438,7 @@ class LumagenClient:
         extraction that *did* surface this setter and the undocumented
         ``ZQI54``), and probing ``ZQI55``-``ZQI57`` plus ``ZQS05``-``ZQS07``
         on a 4242 returned empty payloads — which, per the note in
-        :mod:`pylumagen.protocol`, is indistinguishable from a nonexistent
+        :mod:`aiolumagen.protocol`, is indistinguishable from a nonexistent
         code. So ``state`` will never reflect fan speed and consumers must
         track it optimistically. Don't re-probe for this.
         """
@@ -468,7 +468,7 @@ class LumagenClient:
         :param display_max_nits: 0 to disable HDR mapping, or 50-10000 to
             set the display's peak luminance (the target the Lumagen tone-
             maps toward).
-        :param gamma_mode: :class:`~pylumagen.state.HdrGammaMode` —
+        :param gamma_mode: :class:`~aiolumagen.state.HdrGammaMode` —
             ``AUTO`` (recommended), ``HDR`` (force HDR gamma), or ``SDR``
             (force SDR gamma).
 
@@ -512,7 +512,7 @@ class LumagenClient:
         if self._refresh_task is not None and not self._refresh_task.done():
             self._refresh_task.cancel()
         self._refresh_task = asyncio.create_task(
-            self._refresh_after_command(), name="pylumagen-refresh"
+            self._refresh_after_command(), name="aiolumagen-refresh"
         )
 
     # ------------------------------------------------------------------
@@ -613,7 +613,7 @@ class LumagenClient:
         """Warn that the device identified itself but never reported status.
 
         Full v5 is this library's supported floor and a firmware predating it
-        doesn't fail loudly — per the note in :mod:`pylumagen.protocol`, any
+        doesn't fail loudly — per the note in :mod:`aiolumagen.protocol`, any
         syntactically valid ``ZQ`` code is answered by echoing the code with
         an **empty** payload. So the signal is an absent *or blank* status
         payload, not merely a missing line; the caller's predicate tests

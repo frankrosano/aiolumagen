@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from pylumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
+from aiolumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
 
 
 def test_default_state_has_expected_nulls() -> None:

@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from pylumagen.client import LumagenClient
-from pylumagen.exceptions import LumagenError
-from pylumagen.state import LumagenState
+from aiolumagen.client import LumagenClient
+from aiolumagen.exceptions import LumagenError
+from aiolumagen.state import LumagenState
 from tests.conftest import FakeTransport
 
 

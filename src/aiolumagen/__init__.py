@@ -1,15 +1,15 @@
-"""pylumagen — async Python library for the Lumagen Radiance Pro RS-232 protocol."""
+"""aiolumagen — async Python library for the Lumagen Radiance Pro RS-232 protocol."""
 
 from __future__ import annotations
 
-from pylumagen.client import LumagenClient
-from pylumagen.commands import Aspect, Input, Memory, Misc, Navigation, Power
-from pylumagen.exceptions import (
+from aiolumagen.client import LumagenClient
+from aiolumagen.commands import Aspect, Input, Memory, Misc, Navigation, Power
+from aiolumagen.exceptions import (
     LumagenCommandError,
     LumagenConnectionError,
     LumagenError,
 )
-from pylumagen.state import (
+from aiolumagen.state import (
     Colorspace,
     HdrGammaMode,
     HdrStatus,
@@ -18,7 +18,7 @@ from pylumagen.state import (
     SharpnessSensitivity,
     SourceMode,
 )
-from pylumagen.transport import LumagenTransport
+from aiolumagen.transport import LumagenTransport
 
 __all__ = [
     "Aspect",
@@ -41,4 +41,4 @@ __all__ = [
     "SourceMode",
 ]
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"

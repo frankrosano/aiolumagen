@@ -24,7 +24,7 @@ scheme, and in HA it's guaranteed present regardless: the `usb` integration
 imports `serialx.platforms.serial_esphome` at module scope via
 `serial_proxy_stub`, so any install that brings up `usb` — which
 `ha-lumagen` requires — has already loaded it. Standalone users opt in with
-`pip install pylumagen[esphome]`.
+`pip install aiolumagen[esphome]`.
 
 ### HA's pins are moving targets — don't hard-code them
 
@@ -89,9 +89,9 @@ No other runtime deps. Keep it that way unless there's a clear reason — every 
 ## Build / Packaging
 
 - Build backend: `hatchling`
-- Layout: `src/pylumagen/` (src layout, not flat)
+- Layout: `src/aiolumagen/` (src layout, not flat)
 - `py.typed` is shipped — the library is fully type-checked downstream
-- Wheel includes `src/pylumagen`; sdist also includes `tests`, `README.md`, `LICENSE`, `pyproject.toml`
+- Wheel includes `src/aiolumagen`; sdist also includes `tests`, `README.md`, `LICENSE`, `pyproject.toml`
 
 ## Tooling Configuration
 
@@ -117,8 +117,8 @@ uv run python examples/via_url.py 'esphome://10.0.0.42:6053/?port_name=Lumagen&k
 
 ## Versioning & Distribution
 
-- Version lives in `pyproject.toml` and `pylumagen/__init__.py` (`__version__`). Keep them in sync.
-- Not on PyPI yet — `ha-lumagen`'s manifest installs it from git (`pylumagen@git+https://github.com/frankrosano/pylumagen.git@main`).
+- Version lives in `pyproject.toml` and `aiolumagen/__init__.py` (`__version__`). Keep them in sync.
+- Not on PyPI yet — `ha-lumagen`'s manifest installs it from git (`aiolumagen@git+https://github.com/frankrosano/pylumagen.git@main`). Note the package name (`aiolumagen`) differs from the git repo name (`pylumagen`) — this is intentional, see `product.md`.
 - Local development: `ha-lumagen`'s `pyproject.toml` uses `[tool.uv.sources]` to point at this repo via path with `editable = true`.
 
 ## Lumagen Protocol Notes
@@ -127,6 +127,10 @@ uv run python examples/via_url.py 'esphome://10.0.0.42:6053/?port_name=Lumagen&k
 - The Lumagen **may echo the sent command** as a prefix on the response line. The protocol layer must scan for `!` rather than assuming it's at position 0.
 - Unsolicited reports require user setup on the device: **Menu → Other → I/O Setup → RS-232 Setup → Report mode changes → Full v5 → Save**. Without this, the library still works via polling — keep that path correct. A device left on Full v4 also works: the `!I21`–`!I24` parsers are retained, so pushes still land, minus power/memory in real time.
 - **Full v5 is the supported firmware floor.** `ZQI25` is the only status query issued; there is deliberately no `ZQI24` query. Don't add one back — if pre-v5 support is ever needed, make it an explicit client option rather than a probe, because the device answers any valid `ZQ` code with an empty payload so "is v5 supported" can't be reliably detected at runtime.
+
+## Naming: repo vs. package (again)
+
+Every reference to `pylumagen` in this file's dependency-pin tables and prose above means the git repo. The Python package, its PyPI distribution name, and every `import` statement use `aiolumagen`. See `product.md` for why.
 
 ## Exception Mapping (contract with `ha-lumagen`)
 

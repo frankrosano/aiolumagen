@@ -4,43 +4,45 @@ Three sibling repos work together. This file restates the rules that span them, 
 
 ```
 esphome-lumagen   →   pylumagen   →   ha-lumagen
-  (firmware)         (library)        (HA integration)
+  (firmware)      (library, "aiolumagen")  (HA integration)
 ```
+
+**Naming note:** the library's git repo is still named `pylumagen` (same GitHub URL, same clone path), but the Python package it ships is `aiolumagen` — renamed to avoid a PyPI collision with an unrelated published package. Below, `pylumagen` refers to the repo/URL; `aiolumagen` refers to the import/package/PyPI name. Don't conflate them.
 
 ## Boundary Enforcement (the most important rules)
 
-- **`pylumagen` has zero `homeassistant` imports.** Not in tests, not in helpers, not anywhere. HA-shaped concerns surface via documented `LumagenError` subclasses; the integration translates them.
-- **`ha-lumagen` has zero protocol parsing.** No `!` scans, no `ZQ` formatting, no CSV splits in `coordinator.py`/`button.py`/etc. If you'd need to read `Tip0011` to write a line of code in this repo, that line belongs in `pylumagen`.
-- **`esphome-lumagen` has zero Lumagen-specific logic.** It's a serial bridge. The baud rate (9600 8N1) and the RS-232 UART pin wiring (`tx_pin`/`rx_pin`) are the only Lumagen-aware values in the YAML — everything else (commands, responses, state) is `pylumagen`'s job.
+- **`aiolumagen` has zero `homeassistant` imports.** Not in tests, not in helpers, not anywhere. HA-shaped concerns surface via documented `LumagenError` subclasses; the integration translates them.
+- **`ha-lumagen` has zero protocol parsing.** No `!` scans, no `ZQ` formatting, no CSV splits in `coordinator.py`/`button.py`/etc. If you'd need to read `Tip0011` to write a line of code in this repo, that line belongs in `aiolumagen`.
+- **`esphome-lumagen` has zero Lumagen-specific logic.** It's a serial bridge. The baud rate (9600 8N1) and the RS-232 UART pin wiring (`tx_pin`/`rx_pin`) are the only Lumagen-aware values in the YAML — everything else (commands, responses, state) is `aiolumagen`'s job.
 
 If you violate one of these, stop and move the code.
 
 ## API Contract
 
-- **`pylumagen.__init__`'s `__all__` is the public surface.** Anything re-exported is a contract with `ha-lumagen`. Renaming or removing one is a breaking change and needs a coordinated PR.
+- **`aiolumagen.__init__`'s `__all__` is the public surface.** Anything re-exported is a contract with `ha-lumagen`. Renaming or removing one is a breaking change and needs a coordinated PR.
 - **`LumagenState` field shape is part of the contract.** Adding fields is non-breaking (defaults to `None`). Renaming or retyping a field requires matching changes in `ha-lumagen`'s entities and translations.
 - **Enum values are part of the contract.** `Colorspace.REC_709`, `HdrStatus.HDR10`, etc. — `ha-lumagen` may match against them by identity.
 
 ## Change Ordering
 
-1. **`pylumagen` first.** Add the API + tests, then merge.
-2. **`ha-lumagen` second.** Bump the git pin in `manifest.json` (pinning `pylumagen@git+...@<sha>` is fine when you need a specific commit; otherwise `@main`), update consumers, ship.
+1. **`aiolumagen` (this repo) first.** Add the API + tests, then merge.
+2. **`ha-lumagen` second.** Bump the git pin in `manifest.json` (pinning `aiolumagen@git+https://github.com/frankrosano/pylumagen.git@<sha-or-tag>` is fine when you need a specific commit; otherwise `@main`), update consumers, ship.
 3. **`esphome-lumagen` rarely changes** in lockstep with the others — it ships the wire, not the protocol.
 
-Don't introduce dead API in `pylumagen` "for `ha-lumagen` to consume later." Ship features in the order users see them.
+Don't introduce dead API in `aiolumagen` "for `ha-lumagen` to consume later." Ship features in the order users see them.
 
 ## Version Coordination
 
-- `pylumagen`'s version lives in **two places**: `pyproject.toml`'s `version =` and `src/pylumagen/__init__.py`'s `__version__`. Keep them in sync.
-- `ha-lumagen`'s `manifest.json` `version` is the HACS-visible release; bump it when the integration's behavior changes (not just because pylumagen did).
-- `ha-lumagen`'s `manifest.json` `requirements` line pins `pylumagen` from git. Consider pinning to a tag or sha (rather than `@main`) once we have stable releases.
+- `aiolumagen`'s version lives in **two places**: `pyproject.toml`'s `version =` and `src/aiolumagen/__init__.py`'s `__version__`. Keep them in sync.
+- `ha-lumagen`'s `manifest.json` `version` is the HACS-visible release; bump it when the integration's behavior changes (not just because aiolumagen did).
+- `ha-lumagen`'s `manifest.json` `requirements` line pins `aiolumagen` from git (the `pylumagen` repo URL). Consider pinning to a tag or sha (rather than `@main`) once we have stable releases.
 
 ## Where Bugs File
 
 | Symptom | Likely repo |
 |---|---|
-| Wrong value parsed from a Lumagen response | `pylumagen` (`protocol.py` / `state.py`) |
-| State stops updating; reconnect storm | `pylumagen` (`client.py`) |
+| Wrong value parsed from a Lumagen response | `pylumagen` repo / `aiolumagen` package (`protocol.py` / `state.py`) |
+| State stops updating; reconnect storm | `pylumagen` repo / `aiolumagen` package (`client.py`) |
 | Entity shows wrong icon / device class / unit | `ha-lumagen` |
 | Config flow can't find the serial port | `ha-lumagen` (or HA's `usb` integration upstream) |
 | Bytes never reach the Lumagen / no serial response (TX/RX crossover) | `esphome-lumagen` |
@@ -50,21 +52,21 @@ Don't introduce dead API in `pylumagen` "for `ha-lumagen` to consume later." Shi
 
 | Repo | Approach |
 |---|---|
-| `pylumagen` | Pure-protocol tests fed with recorded byte streams. No serial port, no network. `uv run pytest`. |
+| `pylumagen` (`aiolumagen` package) | Pure-protocol tests fed with recorded byte streams. No serial port, no network. `uv run pytest`. |
 | `ha-lumagen` | `pytest-homeassistant-custom-component` with a mocked `LumagenClient`. Test HA wiring, not protocol behavior (already covered upstream). |
 | `esphome-lumagen` | `./build.sh config` for YAML validation. Manual smoke test on hardware — no automated tests today. |
 
-## Shared Python Conventions (`pylumagen` + `ha-lumagen`)
+## Shared Python Conventions (`aiolumagen` + `ha-lumagen`)
 
 - Python **3.14+**.
 - `from __future__ import annotations` at the top of every module.
 - Ruff: `line-length = 100`, `target-version = "py314"`.
 - Pytest: `asyncio_mode = "auto"`, `addopts = "-ra --strict-markers --strict-config"`.
-- Mypy: `pylumagen` is strict; `ha-lumagen` is not (HA stubs aren't strict-clean yet).
+- Mypy: `aiolumagen` is strict; `ha-lumagen` is not (HA stubs aren't strict-clean yet).
 
 ## Local Development Wiring
 
-- `ha-lumagen/pyproject.toml` overrides the manifest's git pin via `[tool.uv.sources]` to point at the sibling `../pylumagen` checkout (`editable = true`). Edit `pylumagen` and the integration sees changes immediately under `uv run pytest`.
+- `ha-lumagen/pyproject.toml` overrides the manifest's git pin via `[tool.uv.sources]` to point at the sibling `../pylumagen` checkout (`editable = true`, keyed by the `aiolumagen` package name). Edit the `pylumagen` repo and the integration sees changes immediately under `uv run pytest`.
 - End users always get the git-pinned version from `manifest.json`.
 
 ## Secrets, Ignores
@@ -77,6 +79,6 @@ Don't introduce dead API in `pylumagen` "for `ha-lumagen` to consume later." Shi
 
 If a change could plausibly live in two of the three repos, prefer:
 
-- `pylumagen` over `ha-lumagen` for anything Lumagen-aware
-- `pylumagen` over `esphome-lumagen` for anything reactive to Lumagen state
-- `ha-lumagen` over `pylumagen` for anything HA-shaped (entity descriptions, translations, config flow)
+- `aiolumagen` over `ha-lumagen` for anything Lumagen-aware
+- `aiolumagen` over `esphome-lumagen` for anything reactive to Lumagen state
+- `ha-lumagen` over `aiolumagen` for anything HA-shaped (entity descriptions, translations, config flow)

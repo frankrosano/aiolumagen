@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for pylumagen tests."""
+"""Shared pytest fixtures for aiolumagen tests."""
 
 from __future__ import annotations
 

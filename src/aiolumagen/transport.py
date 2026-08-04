@@ -1,4 +1,4 @@
-"""Byte-level transport for pylumagen.
+"""Byte-level transport for aiolumagen.
 
 Wraps :mod:`serialx`'s :func:`create_serial_connection` so the library can
 open any serial URL scheme serialx supports:
@@ -12,16 +12,16 @@ open any serial URL scheme serialx supports:
 The ``esphome://`` scheme needs ``aioesphomeapi``, which this package does
 *not* depend on directly — see the note on ``dependencies`` in
 ``pyproject.toml``. Inside Home Assistant it's already present; elsewhere,
-install ``pylumagen[esphome]``. serialx registers its platforms
+install ``aiolumagen[esphome]``. serialx registers its platforms
 conditionally, so the other schemes work fine without it — and a missing
-install surfaces as a :class:`~pylumagen.exceptions.LumagenConnectionError`
+install surfaces as a :class:`~aiolumagen.exceptions.LumagenConnectionError`
 from :meth:`connect` naming the extra (serialx's own message for this is
 "No handler registered for URI scheme", which doesn't hint at the cause; see
 :meth:`LumagenTransport._connect_error_message`).
 
 :class:`LumagenTransport` is deliberately thin: it opens the URL, pipes
 inbound bytes to a callback, and exposes :meth:`write`. All Lumagen
-protocol concerns live in :class:`~pylumagen.protocol.LumagenProtocol`.
+protocol concerns live in :class:`~aiolumagen.protocol.LumagenProtocol`.
 
 For tests we use a lightweight in-memory stub (see ``tests/conftest.py``)
 that implements the same three public methods (``connect`` / ``disconnect``
@@ -38,7 +38,7 @@ from collections.abc import Callable
 
 import serialx
 
-from pylumagen.exceptions import LumagenConnectionError
+from aiolumagen.exceptions import LumagenConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,9 +138,9 @@ class LumagenTransport:
             f"Could not open {self.url!r}: the ESPHome transport needs the "
             "'aioesphomeapi' package, which isn't installed — so serialx never "
             "registered the esphome:// scheme, which is what the underlying "
-            f"error ({err}) actually means. Install pylumagen[esphome], or "
+            f"error ({err}) actually means. Install aiolumagen[esphome], or "
             "inside Home Assistant make sure the ESPHome integration is set "
-            "up; it provides that package, and pylumagen deliberately doesn't "
+            "up; it provides that package, and aiolumagen deliberately doesn't "
             "depend on it so it can't fight Home Assistant's pinned version."
         )
 

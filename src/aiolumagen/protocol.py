@@ -49,7 +49,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 
-from pylumagen.state import (
+from aiolumagen.state import (
     Colorspace,
     HdrStatus,
     InputStatus,
@@ -313,7 +313,7 @@ class LumagenProtocol:
         claimed three fields, which silently glued the model number and
         serial into one discarded string. Fields beyond the fourth (if a
         future firmware adds any) are ignored here but remain visible in
-        :attr:`~pylumagen.state.LumagenState.device_info_raw`.
+        :attr:`~aiolumagen.state.LumagenState.device_info_raw`.
         """
         state.device_info_raw = data
         parts = data.split(",")

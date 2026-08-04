@@ -1,4 +1,4 @@
-"""Exceptions raised by pylumagen.
+"""Exceptions raised by aiolumagen.
 
 These map onto Home Assistant's ConfigEntryNotReady / etc. in the
 `ha-lumagen` integration; see the library's README for the mapping table.
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 
 class LumagenError(Exception):
-    """Base exception for all pylumagen errors."""
+    """Base exception for all aiolumagen errors."""
 
 
 class LumagenConnectionError(LumagenError):
@@ -32,7 +32,7 @@ class LumagenConnectionError(LumagenError):
 class LumagenCommandError(LumagenError, ValueError):
     """A command argument was out of range or otherwise unencodable.
 
-    Raised by the command builders in :mod:`pylumagen.commands` (and the
+    Raised by the command builders in :mod:`aiolumagen.commands` (and the
     client wrappers around them) when a caller passes a value the Lumagen
     has no encoding for — an input outside 1-19, a sharpness level above
     7, an unknown memory letter. These are programmer errors, not device

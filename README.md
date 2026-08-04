@@ -1,10 +1,12 @@
-# pylumagen
+# aiolumagen
 
 Async Python library for the Lumagen Radiance Pro RS-232 protocol.
 
 The library is protocol-only — no Home Assistant imports, no UI, no opinion about how the state should be surfaced. The [`ha-lumagen`](../ha-lumagen) custom integration consumes it.
 
-Transport is handled by [`serialx`](https://github.com/puddly/serialx), so pylumagen talks to a Lumagen over whatever URL scheme serialx supports — direct USB/RS-232, raw TCP (ser2net), or an ESPHome `serial_proxy` (see [`esphome-lumagen`](../esphome-lumagen)).
+Transport is handled by [`serialx`](https://github.com/puddly/serialx), so aiolumagen talks to a Lumagen over whatever URL scheme serialx supports — direct USB/RS-232, raw TCP (ser2net), or an ESPHome `serial_proxy` (see [`esphome-lumagen`](../esphome-lumagen)).
+
+> **Formerly `pylumagen`.** This project was renamed to `aiolumagen` (see [Status](#status)) to avoid a naming collision with an unrelated `pylumagen` package already published on PyPI. The source still lives in the `pylumagen` git repository/URL; only the distribution and import name changed.
 
 ## Requirements
 
@@ -17,13 +19,13 @@ The ESPHome serial-proxy transport additionally needs `aioesphomeapi`, which
 is **not** a direct dependency here:
 
 ```bash
-pip install pylumagen[esphome]      # standalone use
-pip install pylumagen               # inside Home Assistant
+pip install aiolumagen[esphome]      # standalone use
+pip install aiolumagen               # inside Home Assistant
 ```
 
 Home Assistant already ships `aioesphomeapi` — pinned exactly — for its own
 ESPHome integration, and installs custom-integration requirements into the
-same site-packages. If pylumagen also declared it (at a necessarily looser
+same site-packages. If aiolumagen also declared it (at a necessarily looser
 range), the resolver could move HA's pinned version out from under the
 running ESPHome integration; because it's a Cython package, that leaves
 mismatched `.so` files behind and breaks it with errors like
@@ -40,7 +42,7 @@ raises `LumagenConnectionError` naming what to install.
 
 ```python
 import asyncio
-from pylumagen import LumagenClient, LumagenTransport
+from aiolumagen import LumagenClient, LumagenTransport
 
 async def main():
     transport = LumagenTransport(
@@ -129,7 +131,7 @@ a live ESPHome bridge.
 Alpha / prototype. Not yet published to PyPI — install from git:
 
 ```
-pylumagen @ git+https://github.com/frankrosano/pylumagen.git@main
+aiolumagen @ git+https://github.com/frankrosano/pylumagen.git@main
 ```
 
 ## License

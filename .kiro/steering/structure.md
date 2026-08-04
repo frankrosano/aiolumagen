@@ -1,12 +1,14 @@
 # Project Structure
 
+Note: the git repository is named `pylumagen`; the Python package it ships is `aiolumagen` (renamed to avoid a PyPI collision — see `product.md`).
+
 ```
 pylumagen/
 ├── pyproject.toml              # hatchling build, deps, ruff/mypy/pytest config
 ├── README.md
 ├── LICENSE
 ├── src/
-│   └── pylumagen/
+│   └── aiolumagen/
 │       ├── __init__.py         # public API re-exports + __version__
 │       ├── py.typed            # marker — library is fully typed
 │       ├── client.py           # LumagenClient — composes protocol + transport, runs handshake + poll loop
@@ -39,12 +41,16 @@ If you find yourself adding `await` to `protocol.py` or string parsing to `trans
 ## Conventions
 
 - **`from __future__ import annotations`** at the top of every module.
-- **Public API is `pylumagen.__init__`'s `__all__`.** Anything not re-exported is internal — refactor freely.
+- **Public API is `aiolumagen.__init__`'s `__all__`.** Anything not re-exported is internal — refactor freely.
 - **State fields default to `None`** until first observation. Never fabricate a default value to avoid `None` — it would silently misrepresent the device.
 - **Equality matters.** `LumagenState` must implement `__eq__` so HA's coordinator can dedupe with `always_update=False`. If you add a field, make sure it participates in equality.
 - **Slots on dataclasses.** `LumagenState` is slotted; new fields go in the dataclass declaration, not as ad-hoc attributes.
 - **Enum values mirror Lumagen's wire vocabulary** where it's stable (`Rec.601`, `Rec.709`, `Rec.2020`, `Rec.2100` for `Colorspace`). Don't translate to display strings here — that's the integration's job.
 - **No HA imports.** Ever. If a function would benefit from `homeassistant.exceptions.X`, the right move is to raise a `LumagenError` subclass and document the mapping in `tech.md`.
+
+## Naming: repo vs. package
+
+The git repo is `pylumagen` (unrenamed — same GitHub URL, same clone path used by sibling repos). The Python package it ships is `aiolumagen`: `import aiolumagen`, `pip install aiolumagen`, `src/aiolumagen/`. Don't "fix" this apparent mismatch — it's intentional (see `product.md`). When writing code or docs, use `aiolumagen` for anything import/package/PyPI-shaped and `pylumagen` only for the repo/URL/clone-path itself.
 
 ## Testing
 

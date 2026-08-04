@@ -25,7 +25,7 @@ import asyncio
 import logging
 import sys
 
-from pylumagen import LumagenClient, LumagenState, LumagenTransport
+from aiolumagen import LumagenClient, LumagenState, LumagenTransport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 

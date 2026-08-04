@@ -1,6 +1,6 @@
 # Product
 
-`pylumagen` is an async Python library that implements the Lumagen Radiance Pro RS-232 protocol.
+`aiolumagen` is an async Python library that implements the Lumagen Radiance Pro RS-232 protocol. (The library was renamed from `pylumagen` to `aiolumagen` to avoid a PyPI naming collision with an unrelated published package; the git repository itself is still named `pylumagen`.)
 
 ## Scope
 
@@ -15,7 +15,7 @@ It explicitly does **not** know about Home Assistant, UI, or any specific transp
 
 ## Sibling Repos
 
-- `esphome-lumagen` — ESPHome firmware that exposes the Lumagen's RS-232 port over the network as a `serial_proxy` (via a MAX3232 level shifter). `pylumagen` is one possible client of that proxy.
+- `esphome-lumagen` — ESPHome firmware that exposes the Lumagen's RS-232 port over the network as a `serial_proxy` (via a MAX3232 level shifter). `aiolumagen` is one possible client of that proxy.
 - `ha-lumagen` — Home Assistant custom integration. Thin wrapper over this library; owns config flow, coordinator, and entities.
 
 ## Design Goals
@@ -27,7 +27,7 @@ It explicitly does **not** know about Home Assistant, UI, or any specific transp
 
 ## Public Surface
 
-Re-exported from the package root (`pylumagen.__init__`):
+Re-exported from the package root (`aiolumagen.__init__`):
 
 - Client + transport: `LumagenClient`, `LumagenTransport`
 - State: `LumagenState`, `Colorspace`, `HdrStatus`, `InputStatus`, `SourceMode`

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from pylumagen.protocol import LumagenProtocol
-from pylumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
+from aiolumagen.protocol import LumagenProtocol
+from aiolumagen.state import Colorspace, HdrStatus, InputStatus, LumagenState, SourceMode
 
 
 def _collect() -> tuple[list[tuple[LumagenState, tuple[str, ...]]], LumagenProtocol]:
@@ -278,7 +278,7 @@ def test_i25_truncated_payload_is_safe() -> None:
 
 def test_i30_sharpness_payload_decoded() -> None:
     """!I30 = ``Y4N`` → enabled=True, level=4, sensitivity=NORMAL."""
-    from pylumagen.state import SharpnessSensitivity
+    from aiolumagen.state import SharpnessSensitivity
 
     updates, proto = _collect()
     proto.feed_bytes(b"!I30,Y4N\r\n")
@@ -292,7 +292,7 @@ def test_i30_sharpness_payload_decoded() -> None:
 
 def test_i30_sharpness_disabled() -> None:
     """!I30 = ``N0H`` → enabled=False, level=0, sensitivity=HIGH."""
-    from pylumagen.state import SharpnessSensitivity
+    from aiolumagen.state import SharpnessSensitivity
 
     updates, proto = _collect()
     proto.feed_bytes(b"!I30,N0H\r\n")
@@ -310,7 +310,7 @@ def test_i30_sharpness_without_comma_delimiter() -> None:
     field None — the entities read "unknown" forever even though the
     query was being sent and answered.
     """
-    from pylumagen.state import SharpnessSensitivity
+    from aiolumagen.state import SharpnessSensitivity
 
     updates, proto = _collect()
     proto.feed_bytes(b"!I30Y4N\r\n")
@@ -323,7 +323,7 @@ def test_i30_sharpness_without_comma_delimiter() -> None:
 
 def test_i30_sharpness_comma_separated_fields() -> None:
     """``!I30,Y,4,H`` (one field per value) must decode identically."""
-    from pylumagen.state import SharpnessSensitivity
+    from aiolumagen.state import SharpnessSensitivity
 
     updates, proto = _collect()
     proto.feed_bytes(b"!I30,Y,4,H\r\n")
