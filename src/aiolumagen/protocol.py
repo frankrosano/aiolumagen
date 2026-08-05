@@ -255,9 +255,7 @@ class LumagenProtocol:
         """
         self._pending_label_input = input_number
 
-    def add_response_observer(
-        self, observer: ResponseObserver
-    ) -> Callable[[], None]:
+    def add_response_observer(self, observer: ResponseObserver) -> Callable[[], None]:
         """Register a per-response callback; returns an unregister callable.
 
         See :data:`ResponseObserver` for the contract. This exists so
@@ -364,9 +362,7 @@ class LumagenProtocol:
             # so we rely on the client-primed pending input to know which
             # logical input it belongs to.
             if self._pending_label_input is None:
-                _LOGGER.debug(
-                    "Input label response %r with no pending input; ignoring", data
-                )
+                _LOGGER.debug("Input label response %r with no pending input; ignoring", data)
                 applied = False
             else:
                 n = self._pending_label_input
@@ -552,17 +548,17 @@ class LumagenProtocol:
         if len(parts) >= 2:
             try:
                 state.hdr_source_min_luminance = float(parts[1])
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 _LOGGER.debug("Could not parse !I52 Min field %r", parts[1])
         if len(parts) >= 3:
             try:
                 state.hdr_source_max_luminance = int(parts[2])
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 _LOGGER.debug("Could not parse !I52 Max field %r", parts[2])
         if len(parts) >= 4:
             try:
                 state.hdr_source_max_cll = int(parts[3])
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 _LOGGER.debug("Could not parse !I52 Cll field %r", parts[3])
 
     @staticmethod

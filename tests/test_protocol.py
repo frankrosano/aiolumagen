@@ -71,29 +71,29 @@ def test_i24_full_status_populates_all_fields() -> None:
     # 23 fields per the field-index map in protocol.py
     line = (
         "!I24,"
-        "1,"      # [0]  input status = Active
-        "060,"    # [1]  source vrate
-        "2160,"   # [2]  source resolution
-        "0,"      # [3]  D
-        "0,"      # [4]  X
-        "178,"    # [5]  source aspect = 1.78
-        "185,"    # [6]  content aspect = 1.85
-        "0,"      # [7]  Y
-        "0,"      # [8]  T
-        "3840,"   # [9]  WWWW
-        "0,"      # [10] C
-        "0,"      # [11] B
-        "060,"    # [12] output vrate
-        "2160,"   # [13] output resolution
-        "000,"    # [14] ZZZ
-        "3,"      # [15] colorspace = Rec.2100
-        "1,"      # [16] HDR flag = HDR
-        "p,"      # [17] source mode = progressive
-        "0,"      # [18] H
-        "05,"     # [19] virtual input = 5
-        "00,"     # [20] KK
-        "000,"    # [21] JJJ
-        "000"     # [22] LLL
+        "1,"  # [0]  input status = Active
+        "060,"  # [1]  source vrate
+        "2160,"  # [2]  source resolution
+        "0,"  # [3]  D
+        "0,"  # [4]  X
+        "178,"  # [5]  source aspect = 1.78
+        "185,"  # [6]  content aspect = 1.85
+        "0,"  # [7]  Y
+        "0,"  # [8]  T
+        "3840,"  # [9]  WWWW
+        "0,"  # [10] C
+        "0,"  # [11] B
+        "060,"  # [12] output vrate
+        "2160,"  # [13] output resolution
+        "000,"  # [14] ZZZ
+        "3,"  # [15] colorspace = Rec.2100
+        "1,"  # [16] HDR flag = HDR
+        "p,"  # [17] source mode = progressive
+        "0,"  # [18] H
+        "05,"  # [19] virtual input = 5
+        "00,"  # [20] KK
+        "000,"  # [21] JJJ
+        "000"  # [22] LLL
         "\r\n"
     )
     proto.feed_bytes(line.encode("ascii"))
@@ -187,9 +187,7 @@ def test_i25_full_status_populates_v4_fields_plus_memory_and_power() -> None:
     May 2026: input 1 active, 4K SDR source, output to 4K progressive.
     """
     updates, proto = _collect()
-    line = (
-        "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
-    )
+    line = "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
     proto.feed_bytes(line.encode("ascii"))
     state, codes = updates[-1]
     assert codes == ("I25",)
@@ -213,9 +211,7 @@ def test_i25_full_status_populates_v4_fields_plus_memory_and_power() -> None:
 def test_i25_power_off_reports_power_zero() -> None:
     """A real "after standby" capture — last field is 0."""
     updates, proto = _collect()
-    line = (
-        "!I25,0,059,0000,0,0,178,178,-,0,000f,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,0\r\n"
-    )
+    line = "!I25,0,059,0000,0,0,178,178,-,0,000f,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,0\r\n"
     proto.feed_bytes(line.encode("ascii"))
     state, _ = updates[-1]
     assert state.power_on is False
@@ -232,9 +228,7 @@ def test_i25_n_source_mode_recognized() -> None:
     compare against either one.
     """
     updates, proto = _collect()
-    line = (
-        "!I25,0,059,0000,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,1\r\n"
-    )
+    line = "!I25,0,059,0000,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,n,P,01,01,178,178,A,1\r\n"
     proto.feed_bytes(line.encode("ascii"))
     state, _ = updates[-1]
     assert state.source_mode is SourceMode.NO_INPUT_V5
@@ -527,8 +521,7 @@ def test_reset_clears_pending_label_input() -> None:
 # 4K SDR source, 4K progressive output. 25 payload fields (0-24) — note it
 # ends at power, with nothing at 25/26.
 I25_REAL_CAPTURE = (
-    b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
-    b"01,01,178,178,A,1\r\n"
+    b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
 )
 
 
@@ -564,8 +557,7 @@ def test_i25_nls_engaged_reads_as_true() -> None:
     """Y = 'N' means NLS is engaged — the letter is not a boolean 'no'."""
     updates, proto = _collect()
     proto.feed_bytes(
-        b"!I25,1,059,2160,0,0,178,178,N,0,000e,0,0,059,2160,237,2,0,p,P,"
-        b"01,01,178,178,A,1\r\n"
+        b"!I25,1,059,2160,0,0,178,178,N,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
     )
     assert updates[-1][0].nls_active is True
 
@@ -617,8 +609,7 @@ def test_i25_with_trailing_fields_decodes_subtitle_and_auto_aspect() -> None:
 
     updates, proto = _collect()
     proto.feed_bytes(
-        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
-        b"01,01,178,178,A,1,2,2\r\n"
+        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1,2,2\r\n"
     )
     state, _ = updates[-1]
     assert state.subtitle_shift is SubtitleShift.PERCENT_6  # '2' = 6%
@@ -634,8 +625,7 @@ def test_i25_auto_aspect_status_distinguishes_off_from_disabled() -> None:
 
     updates, proto = _collect()
     base = (
-        "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
-        "01,01,178,178,A,1,0,{}\r\n"
+        "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1,0,{}\r\n"
     )
     proto.feed_bytes(base.format("0").encode("ascii"))
     assert updates[-1][0].auto_aspect_status is AutoAspectStatus.OFF
@@ -657,8 +647,7 @@ def test_i25_auto_aspect_status_does_not_touch_the_zqi54_boolean() -> None:
 
     # A push claiming "off" at index 26 updates only the status enum.
     proto.feed_bytes(
-        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
-        b"01,01,178,178,A,1,0,0\r\n"
+        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,01,01,178,178,A,1,0,0\r\n"
     )
     state, _ = updates[-1]
     assert state.auto_aspect is True  # untouched
@@ -674,8 +663,7 @@ def test_i25_malformed_extended_fields_do_not_erase_good_state() -> None:
 
     # Same line with junk in the CMS and mask fields.
     proto.feed_bytes(
-        b"!I25,1,059,2160,0,0,178,178,-,0,zzzz,?,0,059,2160,237,2,0,p,P,"
-        b"01,01,178,178,A,1\r\n"
+        b"!I25,1,059,2160,0,0,178,178,-,0,zzzz,?,0,059,2160,237,2,0,p,P,01,01,178,178,A,1\r\n"
     )
     state, _ = updates[-1]
     assert state.output_cms == 0  # kept
@@ -707,8 +695,7 @@ def test_i24_also_gets_extended_fields() -> None:
     """The extended set applies to the whole I24/I25 path, not just v5."""
     updates, proto = _collect()
     proto.feed_bytes(
-        b"!I24,1,059,2160,0,0,178,178,N,0,0003,2,1,059,2160,178,2,0,p,P,"
-        b"01,02,178,178\r\n"
+        b"!I24,1,059,2160,0,0,178,178,N,0,0003,2,1,059,2160,178,2,0,p,P,01,02,178,178\r\n"
     )
     state, _ = updates[-1]
     assert state.nls_active is True
@@ -759,9 +746,7 @@ def test_response_observer_sees_committed_state() -> None:
     """Observers run after the new state is swapped in, so reads are fresh."""
     _updates, proto = _collect()
     observed: list[bool | None] = []
-    proto.add_response_observer(
-        lambda _code, _payload: observed.append(proto.state.power_on)
-    )
+    proto.add_response_observer(lambda _code, _payload: observed.append(proto.state.power_on))
     proto.feed_bytes(b"!S02,1\r\n")
     assert observed == [True]
 
@@ -769,9 +754,7 @@ def test_response_observer_sees_committed_state() -> None:
 def test_response_observer_unregister() -> None:
     _updates, proto = _collect()
     seen: list[str] = []
-    unregister = proto.add_response_observer(
-        lambda code, _payload: seen.append(code)
-    )
+    unregister = proto.add_response_observer(lambda code, _payload: seen.append(code))
     proto.feed_bytes(b"!S02,1\r\n")
     unregister()
     proto.feed_bytes(b"!S02,0\r\n")

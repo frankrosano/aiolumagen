@@ -326,12 +326,10 @@ async def test_send_command_schedules_refresh_after_control_command(
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
     zqi25_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI25")
     assert zqs02_count == 1, (
-        f"Expected 1 ZQS02 from refresh tick, got {zqs02_count}: "
-        f"{fake_transport.sent}"
+        f"Expected 1 ZQS02 from refresh tick, got {zqs02_count}: {fake_transport.sent}"
     )
     assert zqi25_count == 1, (
-        f"Expected 1 ZQI25 from refresh tick, got {zqi25_count}: "
-        f"{fake_transport.sent}"
+        f"Expected 1 ZQI25 from refresh tick, got {zqi25_count}: {fake_transport.sent}"
     )
 
 
@@ -360,8 +358,7 @@ async def test_send_command_does_not_refresh_for_query_commands(
     # (We allow exactly 1 ZQS02 from the explicit call.)
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
     assert zqs02_count == 1, (
-        f"Query command should not auto-refresh, got {zqs02_count} ZQS02s: "
-        f"{fake_transport.sent}"
+        f"Query command should not auto-refresh, got {zqs02_count} ZQS02s: {fake_transport.sent}"
     )
 
 
@@ -392,12 +389,10 @@ async def test_refresh_coalesces_overlapping_calls(
     zqs02_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQS02")
     zqi25_count = sum(1 for chunk in fake_transport.sent if chunk == b"ZQI25")
     assert zqs02_count == 2, (
-        f"Expected coalesced refresh = 2 ZQS02s, got {zqs02_count}: "
-        f"{fake_transport.sent}"
+        f"Expected coalesced refresh = 2 ZQS02s, got {zqs02_count}: {fake_transport.sent}"
     )
     assert zqi25_count == 2, (
-        f"Expected coalesced refresh = 2 ZQI25s, got {zqi25_count}: "
-        f"{fake_transport.sent}"
+        f"Expected coalesced refresh = 2 ZQI25s, got {zqi25_count}: {fake_transport.sent}"
     )
 
 
@@ -760,8 +755,14 @@ async def test_query_input_labels_sends_serial_queries(
 
     await c.stop()
     assert fake_transport.sent == [
-        b"ZQS1A0", b"ZQS1A1", b"ZQS1A2", b"ZQS1A3",
-        b"ZQS1A4", b"ZQS1A5", b"ZQS1A6", b"ZQS1A7",
+        b"ZQS1A0",
+        b"ZQS1A1",
+        b"ZQS1A2",
+        b"ZQS1A3",
+        b"ZQS1A4",
+        b"ZQS1A5",
+        b"ZQS1A6",
+        b"ZQS1A7",
     ]
 
 

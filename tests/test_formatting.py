@@ -158,9 +158,7 @@ def test_decode_output_mask_doc_example() -> None:
         (0, ()),
     ],
 )
-def test_decode_output_mask_accepts_hex_or_int(
-    mask: str | int, expected: tuple[int, ...]
-) -> None:
+def test_decode_output_mask_accepts_hex_or_int(mask: str | int, expected: tuple[int, ...]) -> None:
     assert decode_output_mask(mask) == expected
 
 

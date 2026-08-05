@@ -34,9 +34,7 @@ def test_input_command_single_digit_inputs(number: int, expected: str) -> None:
         (19, "i+9"),
     ],
 )
-def test_input_command_uses_plus_prefix_above_nine(
-    number: int, expected: str
-) -> None:
+def test_input_command_uses_plus_prefix_above_nine(number: int, expected: str) -> None:
     """Inputs 10-19 use the ``+`` modifier, NOT a two-digit number.
 
     Regression. Tip0011's ASCII command list states the encoding twice:

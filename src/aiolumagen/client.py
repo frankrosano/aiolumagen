@@ -194,13 +194,8 @@ class LumagenClient:
         await self._transport.connect()
         self._started = True
         await self._send_startup_sequence()
-        if (
-            self._power_poll_interval is not None
-            or self._status_poll_interval is not None
-        ):
-            self._poll_task = asyncio.create_task(
-                self._poll_loop(), name="aiolumagen-poll"
-            )
+        if self._power_poll_interval is not None or self._status_poll_interval is not None:
+            self._poll_task = asyncio.create_task(self._poll_loop(), name="aiolumagen-poll")
 
     async def stop(self) -> None:
         """Cancel polling and disconnect the transport. Idempotent."""
@@ -255,9 +250,11 @@ class LumagenClient:
     def subscribe(self, listener: StateListener) -> Callable[[], None]:
         """Register a sync listener; returns an unsubscribe callable."""
         self._listeners.append(listener)
+
         def _unsubscribe() -> None:
             with suppress(ValueError):
                 self._listeners.remove(listener)
+
         return _unsubscribe
 
     # ------------------------------------------------------------------
@@ -303,8 +300,7 @@ class LumagenClient:
         if len(command) == 5 and command.startswith("ZQ"):
             return command[2:]
         raise LumagenCommandError(
-            f"cannot infer the response code for {command!r}; "
-            "pass expect='<code>' explicitly"
+            f"cannot infer the response code for {command!r}; pass expect='<code>' explicitly"
         )
 
     def _register_waiter(self, code: str) -> asyncio.Future[str]:
@@ -353,9 +349,7 @@ class LumagenClient:
                 if not future.done():
                     future.set_exception(LumagenConnectionError(reason))
 
-    async def wait_for_response(
-        self, code: str, *, timeout: float | None = None
-    ) -> str:
+    async def wait_for_response(self, code: str, *, timeout: float | None = None) -> str:
         """Wait for the next response with ``code`` and return its payload.
 
         For *unsolicited* responses — use :meth:`query_and_wait` when you're
@@ -552,9 +546,7 @@ class LumagenClient:
         except LumagenConnectionError as err:
             _LOGGER.debug("Secondary status query failed (transport down): %s", err)
 
-    async def query_input_labels(
-        self, memory: str = "A", *, timeout: float | None = None
-    ) -> None:
+    async def query_input_labels(self, memory: str = "A", *, timeout: float | None = None) -> None:
         """Query configured labels for inputs 1-8 into :attr:`state.input_labels`.
 
         The Lumagen has no bulk label query, and each per-label response
@@ -590,9 +582,7 @@ class LumagenClient:
         # separate — coercing through Memory here would send the wrong byte.
         memory = memory.upper()
         if memory not in ("A", "B", "C", "D"):
-            raise LumagenCommandError(
-                f"input-label memory must be 'A'-'D', got {memory!r}"
-            )
+            raise LumagenCommandError(f"input-label memory must be 'A'-'D', got {memory!r}")
         limit = self.LABEL_QUERY_TIMEOUT if timeout is None else timeout
         # ZQS1A0 is answered with !S1A — the input digit is absent from the
         # reply, which is exactly why expect= can't be inferred here.
@@ -629,9 +619,15 @@ class LumagenClient:
         ``ZQI30`` is needed to refresh ``state.sharpness_*`` after the
         write. We issue both back-to-back.
         """
-        await self.send_command(sharpness_command(
-            enabled=enabled, level=level, sensitivity=sensitivity,
-        ), cr=True, refresh=False)
+        await self.send_command(
+            sharpness_command(
+                enabled=enabled,
+                level=level,
+                sensitivity=sensitivity,
+            ),
+            cr=True,
+            refresh=False,
+        )
         await self.query_sharpness()
 
     async def set_game_mode(self, enabled: bool) -> None:
@@ -697,7 +693,8 @@ class LumagenClient:
         """
         await self.send_command(
             hdr_intensity_mapping_command(
-                display_max_nits=display_max_nits, gamma_mode=gamma_mode,
+                display_max_nits=display_max_nits,
+                gamma_mode=gamma_mode,
             ),
             cr=True,
             refresh=False,
@@ -758,9 +755,7 @@ class LumagenClient:
                 # polling state: the reply both proves the device is
                 # listening and gates the retry. Nothing else is sent until
                 # it lands, so a dead link costs one command, not five.
-                await self.query_and_wait(
-                    Query.DEVICE_INFO.value, timeout=retry_interval
-                )
+                await self.query_and_wait(Query.DEVICE_INFO.value, timeout=retry_interval)
             except LumagenConnectionError:
                 _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
                 return
@@ -773,9 +768,7 @@ class LumagenClient:
                     )
                 continue
 
-            _LOGGER.debug(
-                "Lumagen startup handshake succeeded on attempt %d", attempt + 1
-            )
+            _LOGGER.debug("Lumagen startup handshake succeeded on attempt %d", attempt + 1)
             try:
                 # Power and input info also ride the !I25 push, so these stay
                 # fire-and-forget — awaiting them would add two more deadlines
@@ -909,11 +902,7 @@ class LumagenClient:
                     if p_iv is not None and now >= p_due:
                         await self.query_power()
                         p_due = now + p_iv
-                    if (
-                        s_iv is not None
-                        and now >= s_due
-                        and self.state.power_on is True
-                    ):
+                    if s_iv is not None and now >= s_due and self.state.power_on is True:
                         await self.query_full_status()
                         # Keep the non-pushed fields (sharpness, game mode,
                         # auto aspect, HDR mapping) in sync with front-panel
@@ -938,9 +927,7 @@ class LumagenClient:
                             listener(self._protocol.state, ("_unavailable",))
                     # Anything still awaiting a reply is waiting on a
                     # subscription we're about to throw away.
-                    self._fail_waiters(
-                        "Transport reconnecting; response will not arrive"
-                    )
+                    self._fail_waiters("Transport reconnecting; response will not arrive")
                     try:
                         await self._transport.disconnect()
                         await asyncio.sleep(1.0)

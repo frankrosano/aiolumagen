@@ -230,9 +230,7 @@ def reset_auto_aspect_command() -> str:
     return "ZY550"
 
 
-def hdr_intensity_mapping_command(
-    *, display_max_nits: int, gamma_mode: HdrGammaMode
-) -> str:
+def hdr_intensity_mapping_command(*, display_max_nits: int, gamma_mode: HdrGammaMode) -> str:
     """Build a ``ZY417XXXXXG`` HDR intensity-mapping command.
 
     Requires a CR terminator on send. Per Tip0011:

@@ -44,10 +44,9 @@ raises `LumagenConnectionError` naming what to install.
 import asyncio
 from aiolumagen import LumagenClient, LumagenTransport
 
+
 async def main():
-    transport = LumagenTransport(
-        "esphome://10.0.0.42:6053/?port_name=Lumagen&key=<base64-psk>"
-    )
+    transport = LumagenTransport("esphome://10.0.0.42:6053/?port_name=Lumagen&key=<base64-psk>")
     client = LumagenClient(transport)
 
     def on_update(state, codes):
@@ -57,6 +56,7 @@ async def main():
     await client.start()
     await asyncio.sleep(60)
     await client.stop()
+
 
 asyncio.run(main())
 ```
