@@ -467,8 +467,31 @@ class LumagenClient:
         """Select input ``n`` (1-19)."""
         await self.send_command(input_command(n))
 
-    async def query_device_info(self) -> None:
-        await self.send_command(Query.DEVICE_INFO.value)
+    async def query_device_info(self, *, timeout: float | None = None) -> str:
+        """Send ``ZQS01`` and return the ``!S01`` payload once it arrives.
+
+        The one query in this family that *awaits* its answer, because it's the
+        one callers gate on: "did a Lumagen actually reply on this port?" is the
+        question a connection check asks, and polling
+        :attr:`state.model <aiolumagen.state.LumagenState.model>` in a loop to
+        answer it is a busy-wait that this exists to remove. Everything else
+        (:meth:`query_power`, :meth:`query_full_status`, the secondary queries)
+        is fire-and-forget, because their values feed state asynchronously and
+        nothing blocks on arrival.
+
+        Keeping the ``ZQS01`` literal on this side of the boundary is the other
+        reason this method exists rather than leaving callers to reach for
+        :meth:`query_and_wait` — a consumer doing that would have to hardcode
+        the wire code, which is exactly what ``ha-lumagen`` must not do.
+
+        :param timeout: Seconds to wait; defaults to :attr:`RESPONSE_TIMEOUT`.
+        :returns: The ``!S01`` payload — ``model,firmware,model_number,serial``.
+            Parsed fields land on :attr:`state` as usual; the raw return is for
+            callers that just want proof of life.
+        :raises TimeoutError: the builtin, if the device doesn't answer.
+        :raises LumagenConnectionError: on a transport failure.
+        """
+        return await self.query_and_wait(Query.DEVICE_INFO.value, timeout=timeout)
 
     async def query_power(self) -> None:
         await self.send_command(Query.POWER.value)
@@ -524,7 +547,17 @@ class LumagenClient:
         Sharpness (``!I30``), game mode (``!I53``), auto aspect (``!I54``),
         display Rec.2020 support (``!I50``) and source HDR mastering
         metadata (``!I52``) are only emitted in response to their explicit
-        ``ZQ`` queries — none of them ride in the ``!I25`` status push. If
+        ``ZQ`` queries — none of them ride in the ``!I25`` status push.
+
+        One partial exception, which is why this list still includes auto
+        aspect: a *tri-state* auto-aspect field appears to ride the push at
+        payload 26, surfacing as
+        :attr:`~aiolumagen.state.LumagenState.auto_aspect_status`. That index
+        is empirically mapped and absent on firmware ``030225``, so ``ZQI54``
+        remains the authoritative source for the
+        :attr:`~aiolumagen.state.LumagenState.auto_aspect` boolean and is
+        still polled here. Don't drop it on the strength of the push until the
+        index is confirmed on hardware. If
         we never issue these, ``state.sharpness_*`` / ``game_mode`` /
         ``auto_aspect`` / ``display_supports_rec2020`` / ``hdr_*`` stay
         ``None`` forever and their HA entities read "unknown" — and any
@@ -662,7 +695,15 @@ class LumagenClient:
         """Set subtitle shifting via ``ZY553X`` (0/1/2).
 
         Reverse-engineered from the firmware; not documented in the
-        bundled Tip0011 PDF. Write-only — no documented query.
+        bundled Tip0011 PDF.
+
+        No query exists for this setting, but that isn't the same as no
+        feedback: the value appears to ride the Full v5 status push at payload
+        25, surfacing as
+        :attr:`~aiolumagen.state.LumagenState.subtitle_shift`. That index is
+        empirically mapped and absent on firmware ``030225``, so treat the
+        field as a bonus rather than a guarantee — a consumer still needs to
+        track what it last wrote for the firmwares that stay quiet.
         """
         await self.send_command(subtitle_shift_command(level), cr=True, refresh=False)
 
@@ -755,7 +796,7 @@ class LumagenClient:
                 # polling state: the reply both proves the device is
                 # listening and gates the retry. Nothing else is sent until
                 # it lands, so a dead link costs one command, not five.
-                await self.query_and_wait(Query.DEVICE_INFO.value, timeout=retry_interval)
+                await self.query_device_info(timeout=retry_interval)
             except LumagenConnectionError:
                 _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
                 return

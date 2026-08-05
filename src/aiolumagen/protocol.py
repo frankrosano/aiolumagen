@@ -239,9 +239,15 @@ class LumagenProtocol:
     def pending_label_input(self) -> int | None:
         """Input number a subsequent ``!S1x`` label response will be assigned to.
 
-        ``None`` once the pending response has been consumed. Exposed so the
-        client can tell when a label query has been answered before issuing
-        the next one.
+        ``None`` once the pending response has been consumed.
+
+        Read-only observability, not a coordination channel. The client used to
+        poll this to tell whether a label query had been answered; it now
+        awaits the response itself (see
+        :meth:`~aiolumagen.client.LumagenClient.query_and_wait`), so the only
+        remaining consumers are tests asserting the primer is set and cleared
+        at the right moments — which is worth keeping, because a stuck primer
+        is how a label gets filed under the wrong input.
         """
         return self._pending_label_input
 

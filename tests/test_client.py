@@ -965,3 +965,43 @@ async def test_stop_fails_pending_waiters_with_connection_error(
 
     with pytest.raises(LumagenConnectionError):
         await waiter
+
+
+async def test_query_device_info_returns_the_payload(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """The one query in the family that awaits its answer.
+
+    Callers use it as a connection check ("did a Lumagen actually reply on this
+    port?"), which is a question a fire-and-forget send can't answer. It also
+    keeps the ZQS01 literal inside the library, so a consumer doing the same
+    check doesn't have to hardcode a wire code.
+    """
+    await client.start()
+    fake_transport.sent.clear()
+    payload = await client.query_device_info()
+    assert payload == "FakeModel,000000,0000,000000"
+    assert fake_transport.sent == [b"ZQS01"]
+    # Parsed fields still land on state as usual.
+    assert client.state.model == "FakeModel"
+
+
+async def test_query_device_info_times_out_on_a_silent_device(
+    fake_transport: FakeTransport,
+) -> None:
+    """A port with nothing on the other end raises rather than hanging."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+
+    # Stop the fake answering, simulating a port with no Lumagen behind it.
+    async def _write_without_answering(data: bytes) -> None:
+        fake_transport.sent.append(data)
+
+    fake_transport.write = _write_without_answering  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError):
+        await c.query_device_info(timeout=0.05)
+    await c.stop()
