@@ -1,9 +1,7 @@
 # Project Structure
 
-Note: the git repository is named `pylumagen`; the Python package it ships is `aiolumagen` (renamed to avoid a PyPI collision — see `product.md`).
-
 ```
-pylumagen/
+aiolumagen/
 ├── pyproject.toml              # hatchling build, deps, ruff/mypy/pytest config
 ├── README.md
 ├── LICENSE
@@ -11,15 +9,17 @@ pylumagen/
 │   └── aiolumagen/
 │       ├── __init__.py         # public API re-exports + __version__
 │       ├── py.typed            # marker — library is fully typed
-│       ├── client.py           # LumagenClient — composes protocol + transport, runs handshake + poll loop
+│       ├── client.py           # LumagenClient — protocol + transport, handshake, poll loop, response correlation
 │       ├── protocol.py         # LumagenProtocol — pure-sync line buffer, ! scan, CSV split, state merge
 │       ├── transport.py        # LumagenTransport — thin wrapper over serialx
 │       ├── state.py            # LumagenState dataclass + Colorspace/HdrStatus/InputStatus/SourceMode enums
 │       ├── commands.py         # Aspect, Input, Memory enums + command-formatting helpers
+│       ├── formatting.py       # wire-code decoders (rate, aspect, derived width, output mask)
 │       └── exceptions.py       # LumagenError hierarchy
 ├── tests/                      # pytest suite (asyncio_mode=auto)
 └── examples/
-    └── via_url.py              # CLI example: pass a serialx URL, print state updates
+    ├── via_url.py              # CLI example: pass a serialx URL, print state updates
+    └── send_raw.py             # CLI example: send an arbitrary command
 ```
 
 ## Architectural Layers
@@ -47,10 +47,6 @@ If you find yourself adding `await` to `protocol.py` or string parsing to `trans
 - **Slots on dataclasses.** `LumagenState` is slotted; new fields go in the dataclass declaration, not as ad-hoc attributes.
 - **Enum values mirror Lumagen's wire vocabulary** where it's stable (`Rec.601`, `Rec.709`, `Rec.2020`, `Rec.2100` for `Colorspace`). Don't translate to display strings here — that's the integration's job.
 - **No HA imports.** Ever. If a function would benefit from `homeassistant.exceptions.X`, the right move is to raise a `LumagenError` subclass and document the mapping in `tech.md`.
-
-## Naming: repo vs. package
-
-The git repo is `pylumagen` (unrenamed — same GitHub URL, same clone path used by sibling repos). The Python package it ships is `aiolumagen`: `import aiolumagen`, `pip install aiolumagen`, `src/aiolumagen/`. Don't "fix" this apparent mismatch — it's intentional (see `product.md`). When writing code or docs, use `aiolumagen` for anything import/package/PyPI-shaped and `pylumagen` only for the repo/URL/clone-path itself.
 
 ## Testing
 

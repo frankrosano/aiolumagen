@@ -131,7 +131,7 @@ a live ESPHome bridge.
 Alpha / prototype. Not yet published to PyPI — install from git:
 
 ```
-aiolumagen @ git+https://github.com/frankrosano/pylumagen.git@main
+aiolumagen @ git+https://github.com/frankrosano/aiolumagen.git@v0.5.0
 ```
 
 ## License

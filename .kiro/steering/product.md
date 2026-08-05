@@ -1,6 +1,6 @@
 # Product
 
-`aiolumagen` is an async Python library that implements the Lumagen Radiance Pro RS-232 protocol. (The library was renamed from `pylumagen` to `aiolumagen` to avoid a PyPI naming collision with an unrelated published package; the git repository itself is still named `pylumagen`.)
+`aiolumagen` is an async Python library that implements the Lumagen Radiance Pro RS-232 protocol. (Formerly `pylumagen` — renamed to avoid a naming collision with an unrelated `pylumagen` package already published on PyPI. The rename covered everything: GitHub repo, distribution name, and import name are all `aiolumagen`.)
 
 ## Scope
 

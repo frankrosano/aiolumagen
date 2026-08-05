@@ -3,11 +3,11 @@
 Three sibling repos work together. This file restates the rules that span them, so they stay consistent when work touches more than one.
 
 ```
-esphome-lumagen   →   pylumagen   →   ha-lumagen
-  (firmware)      (library, "aiolumagen")  (HA integration)
+esphome-lumagen   →   aiolumagen   →   ha-lumagen
+  (firmware)         (library)        (HA integration)
 ```
 
-**Naming note:** the library's git repo is still named `pylumagen` (same GitHub URL, same clone path), but the Python package it ships is `aiolumagen` — renamed to avoid a PyPI collision with an unrelated published package. Below, `pylumagen` refers to the repo/URL; `aiolumagen` refers to the import/package/PyPI name. Don't conflate them.
+**Naming note:** this library was formerly `pylumagen`, renamed to avoid a collision with an unrelated `pylumagen` package already published on PyPI. The rename covered everything — GitHub repo, clone path, distribution name and import name are all `aiolumagen`. A surviving `pylumagen` reference anywhere in these repos is stale; the only correct use of the old name is describing the rename itself.
 
 ## Boundary Enforcement (the most important rules)
 
@@ -26,7 +26,7 @@ If you violate one of these, stop and move the code.
 ## Change Ordering
 
 1. **`aiolumagen` (this repo) first.** Add the API + tests, then merge.
-2. **`ha-lumagen` second.** Bump the git pin in `manifest.json` (pinning `aiolumagen@git+https://github.com/frankrosano/pylumagen.git@<sha-or-tag>` is fine when you need a specific commit; otherwise `@main`), update consumers, ship.
+2. **`ha-lumagen` second.** Bump the git pin in `manifest.json` (pinning `aiolumagen@git+https://github.com/frankrosano/aiolumagen.git@<sha-or-tag>` is fine when you need a specific commit; otherwise `@main`), update consumers, ship.
 3. **`esphome-lumagen` rarely changes** in lockstep with the others — it ships the wire, not the protocol.
 
 Don't introduce dead API in `aiolumagen` "for `ha-lumagen` to consume later." Ship features in the order users see them.
@@ -35,14 +35,14 @@ Don't introduce dead API in `aiolumagen` "for `ha-lumagen` to consume later." Sh
 
 - `aiolumagen`'s version lives in **two places**: `pyproject.toml`'s `version =` and `src/aiolumagen/__init__.py`'s `__version__`. Keep them in sync.
 - `ha-lumagen`'s `manifest.json` `version` is the HACS-visible release; bump it when the integration's behavior changes (not just because aiolumagen did).
-- `ha-lumagen`'s `manifest.json` `requirements` line pins `aiolumagen` from git (the `pylumagen` repo URL). Consider pinning to a tag or sha (rather than `@main`) once we have stable releases.
+- `ha-lumagen`'s `manifest.json` `requirements` line pins `aiolumagen` from git. Pin it to the tag you just cut rather than `@main`, so an install resolves to a known artifact.
 
 ## Where Bugs File
 
 | Symptom | Likely repo |
 |---|---|
-| Wrong value parsed from a Lumagen response | `pylumagen` repo / `aiolumagen` package (`protocol.py` / `state.py`) |
-| State stops updating; reconnect storm | `pylumagen` repo / `aiolumagen` package (`client.py`) |
+| Wrong value parsed from a Lumagen response | `aiolumagen` (`protocol.py` / `state.py`) |
+| State stops updating; reconnect storm | `aiolumagen` (`client.py`) |
 | Entity shows wrong icon / device class / unit | `ha-lumagen` |
 | Config flow can't find the serial port | `ha-lumagen` (or HA's `usb` integration upstream) |
 | Bytes never reach the Lumagen / no serial response (TX/RX crossover) | `esphome-lumagen` |
@@ -52,7 +52,7 @@ Don't introduce dead API in `aiolumagen` "for `ha-lumagen` to consume later." Sh
 
 | Repo | Approach |
 |---|---|
-| `pylumagen` (`aiolumagen` package) | Pure-protocol tests fed with recorded byte streams. No serial port, no network. `uv run pytest`. |
+| `aiolumagen` | Pure-protocol tests fed with recorded byte streams. No serial port, no network. `uv run pytest`. |
 | `ha-lumagen` | `pytest-homeassistant-custom-component` with a mocked `LumagenClient`. Test HA wiring, not protocol behavior (already covered upstream). |
 | `esphome-lumagen` | `./build.sh config` for YAML validation. Manual smoke test on hardware — no automated tests today. |
 
@@ -66,7 +66,7 @@ Don't introduce dead API in `aiolumagen` "for `ha-lumagen` to consume later." Sh
 
 ## Local Development Wiring
 
-- `ha-lumagen/pyproject.toml` overrides the manifest's git pin via `[tool.uv.sources]` to point at the sibling `../pylumagen` checkout (`editable = true`, keyed by the `aiolumagen` package name). Edit the `pylumagen` repo and the integration sees changes immediately under `uv run pytest`.
+- `ha-lumagen/pyproject.toml` overrides the manifest's git pin via `[tool.uv.sources]` to point at the sibling `../aiolumagen` checkout (`editable = true`). Edit this repo and the integration sees the change immediately under `uv run pytest`.
 - End users always get the git-pinned version from `manifest.json`.
 
 ## Secrets, Ignores
