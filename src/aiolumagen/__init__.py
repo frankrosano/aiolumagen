@@ -9,7 +9,14 @@ from aiolumagen.exceptions import (
     LumagenConnectionError,
     LumagenError,
 )
+from aiolumagen.formatting import (
+    decode_aspect_ratio,
+    decode_output_mask,
+    decode_vertical_rate,
+    derive_horizontal_resolution,
+)
 from aiolumagen.state import (
+    AutoAspectStatus,
     Colorspace,
     HdrGammaMode,
     HdrStatus,
@@ -17,11 +24,13 @@ from aiolumagen.state import (
     LumagenState,
     SharpnessSensitivity,
     SourceMode,
+    SubtitleShift,
 )
 from aiolumagen.transport import LumagenTransport
 
 __all__ = [
     "Aspect",
+    "AutoAspectStatus",
     "Colorspace",
     "HdrGammaMode",
     "HdrStatus",
@@ -39,6 +48,11 @@ __all__ = [
     "Power",
     "SharpnessSensitivity",
     "SourceMode",
+    "SubtitleShift",
+    "decode_aspect_ratio",
+    "decode_output_mask",
+    "decode_vertical_rate",
+    "derive_horizontal_resolution",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

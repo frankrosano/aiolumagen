@@ -7,7 +7,11 @@ import asyncio
 import pytest
 
 from aiolumagen.client import LumagenClient
-from aiolumagen.exceptions import LumagenError
+from aiolumagen.exceptions import (
+    LumagenCommandError,
+    LumagenConnectionError,
+    LumagenError,
+)
 from aiolumagen.state import LumagenState
 from tests.conftest import FakeTransport
 
@@ -119,6 +123,23 @@ async def test_commands_send_expected_bytes(
     await client.standby()
     await client.set_input(3)
     assert fake_transport.sent == [b"%", b"$", b"i3"]
+
+
+async def test_set_input_above_nine_uses_the_plus_encoding(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """set_input must route through the encoder, not format i{n} itself.
+
+    Tip0011's own example is "i+2 for input 12". Previously this wrote b"i12",
+    which selects input 1 and then feeds a stray digit — silently the wrong
+    input, with no error anywhere. See test_commands.py for the encoder tests.
+    """
+    await client.start()
+    fake_transport.sent.clear()
+    await client.set_input(10)
+    await client.set_input(12)
+    await client.set_input(19)
+    assert fake_transport.sent == [b"i+0", b"i+2", b"i+9"]
 
 
 async def test_send_command_before_start_raises(
@@ -733,7 +754,9 @@ async def test_query_input_labels_sends_serial_queries(
     await c.start()
     fake_transport.sent.clear()
 
-    await c.query_input_labels(memory="A", settle=0)
+    # Nothing answers, so every input burns its (tiny) deadline. The point is
+    # that all 8 still go out — a timeout skips one label, not the sweep.
+    await c.query_input_labels(memory="A", timeout=0.01)
 
     await c.stop()
     assert fake_transport.sent == [
@@ -753,7 +776,7 @@ async def test_query_input_labels_validates_memory(
     await c.start()
     fake_transport.sent.clear()
     with pytest.raises(ValueError, match="'A'-'D'"):
-        await c.query_input_labels(memory="Z", settle=0)
+        await c.query_input_labels(memory="Z")
     assert fake_transport.sent == []
     await c.stop()
 
@@ -787,7 +810,157 @@ async def test_query_input_labels_populates_state_end_to_end(
 
     fake_transport.write = _write_and_answer  # type: ignore[method-assign]
 
-    await c.query_input_labels(memory="A", settle=0)
+    await c.query_input_labels(memory="A", timeout=0.02)
     await c.stop()
 
     assert c.state.input_labels == {1: "Apple TV", 2: "Roku", 3: "Shield"}
+
+
+async def test_label_query_timeout_clears_primer_so_a_late_reply_is_dropped(
+    fake_transport: FakeTransport,
+) -> None:
+    """An unanswered label query must not leave the parser primed.
+
+    This is the misattribution the old fixed-sleep loop couldn't prevent: it
+    primed input N, slept, and moved on to N+1 with the primer still set, so a
+    reply that arrived a moment too late was filed under the wrong input. Now
+    a timeout clears the primer, which downgrades "too slow" from a wrong
+    label to a missing one.
+    """
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+
+    # Nothing answers any of the 8 queries.
+    await c.query_input_labels(memory="A", timeout=0.01)
+    assert c.state.input_labels == {}
+
+    # A reply straggling in after the sweep has no owner and must be dropped
+    # rather than attributed to input 8 (the last one primed).
+    fake_transport.feed(b"!S1A,Late Reply\r\n")
+    await c.stop()
+    assert c.state.input_labels == {}
+
+
+# ---------- Request/response correlation ----------
+
+
+async def test_query_and_wait_returns_response_payload(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """The awaited payload is the text after the code.
+
+    The fake answers ZQS01 synchronously inside write(), which also pins down
+    that the waiter is registered *before* the send — otherwise this reply
+    would land before anyone was listening and the call would time out.
+    """
+    await client.start()
+    payload = await client.query_and_wait("ZQS01")
+    assert payload == "FakeModel,000000,0000,000000"
+
+
+async def test_query_and_wait_times_out_when_nothing_answers(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """A missing reply raises the builtin TimeoutError, not a library type.
+
+    aiolumagen deliberately has no timeout exception of its own, so consumers
+    already catching TimeoutError around asyncio.timeout need no changes.
+    """
+    await client.start()
+    with pytest.raises(TimeoutError):
+        await client.query_and_wait("ZQS02", timeout=0.05)
+
+
+async def test_query_and_wait_returns_empty_payload_for_unsupported_query(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """An empty payload is a real answer: "replied, but doesn't support this".
+
+    The Lumagen echoes any syntactically valid ZQ code with nothing after the
+    comma, so callers must be able to tell that apart from silence. Silence is
+    a TimeoutError; this is "".
+    """
+    await client.start()
+    original_write = fake_transport.write
+
+    async def _write_and_answer(data: bytes) -> None:
+        await original_write(data)
+        if data == b"ZQI99":
+            fake_transport.feed(b"!I99,\r\n")
+
+    fake_transport.write = _write_and_answer  # type: ignore[method-assign]
+    assert await client.query_and_wait("ZQI99", timeout=0.5) == ""
+
+
+async def test_query_and_wait_rejects_uninferable_command_without_expect(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """ZQS1A0 is answered with !S1A, so its code can't be inferred."""
+    await client.start()
+    fake_transport.sent.clear()
+    with pytest.raises(LumagenCommandError, match="cannot infer"):
+        await client.query_and_wait("ZQS1A0")
+    # Nothing should have been written for a command we refused to track.
+    assert fake_transport.sent == []
+
+
+async def test_wait_for_response_resolves_on_unsolicited_push(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """wait_for_response works without sending anything — for pushed reports."""
+    await client.start()
+
+    async def _push_later() -> None:
+        await asyncio.sleep(0.02)
+        fake_transport.feed(b"!S02,1\r\n")
+
+    push_task = asyncio.create_task(_push_later())
+    assert await client.wait_for_response("!S02", timeout=1.0) == "1"
+    assert client.state.power_on is True
+    await push_task
+
+
+async def test_response_observer_fires_even_when_state_is_unchanged(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """Correlation must not inherit the state-change dedupe.
+
+    The protocol suppresses update callbacks when a response changes nothing,
+    so a waiter keyed on state would hang on the second identical poll. The
+    observer hook fires per response line instead.
+    """
+    await client.start()
+    fake_transport.feed(b"!S02,1\r\n")  # establish power on
+    # Second identical response: no state change, so no state listener fires.
+    original_write = fake_transport.write
+
+    async def _write_and_answer(data: bytes) -> None:
+        await original_write(data)
+        if data == b"ZQS02":
+            fake_transport.feed(b"!S02,1\r\n")
+
+    fake_transport.write = _write_and_answer  # type: ignore[method-assign]
+    assert await client.query_and_wait("ZQS02", timeout=0.5) == "1"
+
+
+async def test_stop_fails_pending_waiters_with_connection_error(
+    fake_transport: FakeTransport,
+) -> None:
+    """A waiter outliving the client gets a catchable error, not CancelledError."""
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=None,
+        status_poll_interval=None,
+    )
+    await c.start()
+
+    waiter = asyncio.create_task(c.wait_for_response("S02", timeout=5.0))
+    await asyncio.sleep(0)  # let the task register its waiter
+    await c.stop()
+
+    with pytest.raises(LumagenConnectionError):
+        await waiter

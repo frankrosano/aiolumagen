@@ -32,30 +32,57 @@ Key invariants (from the old C++ comments, confirmed against captures):
   ``ZQI`` and ``ZQS`` namespaces.
 
 Full v5 (``ZQI25`` / ``!I25``) is the recommended unsolicited-reporting
-mode for current Lumagen firmware. It extends the v4 layout with two new
-fields at the end:
+mode for current Lumagen firmware. It extends the v4 layout with trailing
+fields:
 
 * index 23 — active input memory letter (``A``/``B``/``C``/``D``)
 * index 24 — power state (``0``/``1``)
+* index 25 — subtitle shift status (``0`` off, ``1`` 3%, ``2`` 6%) *(empirical)*
+* index 26 — auto aspect status (``0`` off, ``1`` disabled, ``2`` on) *(empirical)*
 
-These were previously only obtainable via separate ``ZQI00`` and ``ZQS02``
-queries; v5 pushes them on every state change so power transitions and
-memory swaps reach listeners in real time without a follow-up poll.
+Indices 23 and 24 were previously only obtainable via separate ``ZQI00`` and
+``ZQS02`` queries; v5 pushes them on every state change so power transitions
+and memory swaps reach listeners in real time without a follow-up poll.
+
+**On the evidence for 25 and 26.** ``ZQI25`` is absent from
+``Tip0011_RS232CommandInterface_111023.pdf`` entirely — Full v5 postdates that
+revision, so every index above 22 here is empirical. 23 and 24 are confirmed
+by captures in ``tests/test_protocol.py``. 25 and 26 are **not** confirmed
+here and should be read as a hypothesis: the recorded capture from firmware
+``030225`` ends at index 24, and the firmware installer is compressed so its
+format strings aren't readable either. Both reads are length-guarded, so on
+that firmware the fields stay ``None`` and nothing changes. Tip0011's own
+advice for this layout — "allow for future comma delimited fields being added
+at the end of the response" — is why a newer firmware having grown two more
+fields is the likeliest explanation.
+
+Because index 26 is unverified it populates
+:attr:`~aiolumagen.state.LumagenState.auto_aspect_status` only; the boolean
+:attr:`~aiolumagen.state.LumagenState.auto_aspect` stays sourced from the
+documented ``ZQI54`` query so a wrong guess can't corrupt it.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 
+from aiolumagen.formatting import (
+    decode_output_mask,
+    decode_vertical_rate,
+    derive_horizontal_resolution,
+)
 from aiolumagen.state import (
+    AutoAspectStatus,
     Colorspace,
     HdrStatus,
     InputStatus,
     LumagenState,
     SharpnessSensitivity,
     SourceMode,
+    SubtitleShift,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,18 +101,36 @@ fine in Python and gives us plenty of headroom for pathological bursts.
 _I24_INPUT_STATUS = 0  # M
 _I24_SOURCE_VRATE = 1  # RRR
 _I24_SOURCE_RESOLUTION = 2  # VVVV
+_I24_SOURCE_3D_MODE = 3  # D: 0,1,2,4,8
+_I24_INPUT_CONFIG = 4  # X
 _I24_SOURCE_ASPECT = 5  # AAA
 _I24_CONTENT_ASPECT = 6  # SSS
+_I24_NLS_ACTIVE = 7  # Y: 'N'=NLS, '-'=normal
+_I24_OUTPUT_3D_MODE = 8  # T: 0,1,2,4,8
+_I24_OUTPUT_ENABLED = 9  # WWWW: 16-bit hex mask, b0 = output 1
+_I24_OUTPUT_CMS = 10  # C: 0-7
+_I24_OUTPUT_STYLE = 11  # B: 0-7
 _I24_OUTPUT_VRATE = 12  # PPP
 _I24_OUTPUT_RESOLUTION = 13  # QQQQ
+_I24_OUTPUT_ASPECT = 14  # ZZZ
 _I24_COLORSPACE = 15  # E: 0=601, 1=709, 2=2020, 3=2100
 _I24_HDR_FLAG = 16  # F: 0=SDR, 1=HDR
 _I24_SOURCE_MODE = 17  # G: i, p, -, n
+_I24_OUTPUT_MODE = 18  # H: 'I' or 'P' (uppercase on the wire)
 _I24_VIRTUAL_INPUT = 19  # II: 1-19
+_I24_PHYSICAL_INPUT = 20  # KK: 1-19
+_I24_DETECTED_SOURCE_ASPECT = 21  # JJJ
+_I24_DETECTED_CONTENT_ASPECT = 22  # LLL
 
 # I25-only fields appended to the v4 layout (see module docstring).
 _I25_INPUT_MEMORY = 23  # A/B/C/D
 _I25_POWER_STATE = 24  # 0=off, 1=on
+# Indices 25/26 are empirical and NOT in Tip0011 — see the module docstring's
+# Full v5 section. Both are read behind a length guard, so a firmware that
+# stops at power (like the 030225 capture in tests/test_protocol.py) simply
+# leaves them unset.
+_I25_SUBTITLE_SHIFT = 25  # 0=off, 1=3%, 2=6%
+_I25_AUTO_ASPECT = 26  # 0=off, 1=disabled, 2=on
 
 _INPUT_STATUS_MAP = {
     "0": InputStatus.NO_SOURCE,
@@ -100,6 +145,35 @@ _COLORSPACE_MAP = {
     "3": Colorspace.REC_2100,
 }
 
+_SUBTITLE_SHIFT_MAP = {
+    "0": SubtitleShift.OFF,
+    "1": SubtitleShift.PERCENT_3,
+    "2": SubtitleShift.PERCENT_6,
+}
+
+_AUTO_ASPECT_MAP = {
+    "0": AutoAspectStatus.OFF,
+    "1": AutoAspectStatus.DISABLED,
+    "2": AutoAspectStatus.ON,
+}
+
+
+def _as_int(value: str, label: str) -> int | None:
+    """Parse a small integer status field, or ``None`` if it's unreadable.
+
+    Callers assign only on a non-``None`` result, so a malformed field leaves
+    the previously-observed value in place rather than blanking it — a garbled
+    line shouldn't erase good state.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        return int(stripped)
+    except ValueError:
+        _LOGGER.debug("Could not parse %s field %r", label, value)
+        return None
+
 
 # Type alias for the per-update callback handed to LumagenProtocol.
 StateUpdateCallback = Callable[[LumagenState, tuple[str, ...]], None]
@@ -108,6 +182,29 @@ StateUpdateCallback = Callable[[LumagenState, tuple[str, ...]], None]
 ``codes_touched`` lists the 3-char response codes that contributed to this
 update — e.g. ``("I24",)`` for a full-status report, ``("S02",)`` for a
 power-only change.
+"""
+
+ResponseObserver = Callable[[str, str], None]
+"""Callback shape: ``(code, payload) -> None``.
+
+Fired once for **every** response line the parser reads, which makes it
+strictly broader than :data:`StateUpdateCallback` in two ways that matter for
+request/response correlation:
+
+* It fires even when the response changed nothing, where the state-update
+  callback is suppressed by the no-op dedupe.
+* It fires for codes the parser has no handler for, so a caller can await an
+  undocumented response.
+
+``payload`` is the text after the code (and its optional comma), exactly as
+the per-code handlers see it — empty string for a payload-less response. Since
+the Lumagen answers any syntactically valid ``ZQ`` code with an empty payload,
+an observer being called proves the line arrived, *not* that the query is
+supported; check for a non-empty payload for that.
+
+Observers run synchronously from the transport's data callback, after the new
+state has been committed, so reading :attr:`LumagenProtocol.state` from inside
+one sees the response's effect.
 """
 
 
@@ -124,6 +221,7 @@ class LumagenProtocol:
         self._on_update = on_update
         self._state = LumagenState()
         self._rx = bytearray()
+        self._response_observers: list[ResponseObserver] = []
         # Correlation context for input-label queries. The Lumagen's label
         # response (!S1x,<label>) reports only the memory letter, never the
         # input number, so the client primes this with the input it's about
@@ -147,16 +245,41 @@ class LumagenProtocol:
         """
         return self._pending_label_input
 
-    def expect_input_label(self, input_number: int) -> None:
+    def expect_input_label(self, input_number: int | None) -> None:
         """Prime the parser to attribute the next ``!S1x`` response to ``input_number``.
 
         Called by the client immediately before it sends a ``ZQS1XY`` label
-        query. See :attr:`pending_label_input`.
+        query. Pass ``None`` to clear the primer — the client does this when a
+        label query times out, so a late reply can't be misattributed to
+        whichever input is asked about next. See :attr:`pending_label_input`.
         """
         self._pending_label_input = input_number
 
+    def add_response_observer(
+        self, observer: ResponseObserver
+    ) -> Callable[[], None]:
+        """Register a per-response callback; returns an unregister callable.
+
+        See :data:`ResponseObserver` for the contract. This exists so
+        :class:`~aiolumagen.client.LumagenClient` can correlate a query with
+        its reply without the protocol layer growing any notion of a waiter —
+        it stays synchronous and I/O-free, and the async bookkeeping lives in
+        the client where it belongs.
+        """
+        self._response_observers.append(observer)
+
+        def _unregister() -> None:
+            with suppress(ValueError):
+                self._response_observers.remove(observer)
+
+        return _unregister
+
     def reset(self) -> None:
-        """Discard any partial line and pending label context. Call on reconnect."""
+        """Discard any partial line and pending label context. Call on reconnect.
+
+        Registered response observers survive: the client wires its correlation
+        observer once at construction and expects it to outlive a reconnect.
+        """
         self._rx.clear()
         self._pending_label_input = None
 
@@ -223,6 +346,11 @@ class LumagenProtocol:
         # firing exactly one callback per inbound line.
         pending = replace(self._state)
         touched: tuple[str, ...] = (code,)
+        # Whether the response contributed to state. A False here means we
+        # skip the state commit but STILL notify response observers below:
+        # correlation cares that the line arrived, not that it changed
+        # anything.
+        applied = True
 
         if code == "S00":
             pending.alive = True
@@ -239,12 +367,14 @@ class LumagenProtocol:
                 _LOGGER.debug(
                     "Input label response %r with no pending input; ignoring", data
                 )
-                return
-            n = self._pending_label_input
-            self._pending_label_input = None
-            # Build a fresh dict so the previous state's map is untouched —
-            # the equality diff below depends on old and new not aliasing.
-            pending.input_labels = {**self._state.input_labels, n: data}
+                applied = False
+            else:
+                n = self._pending_label_input
+                self._pending_label_input = None
+                # Build a fresh dict so the previous state's map is untouched
+                # — the equality diff below depends on old and new not
+                # aliasing.
+                pending.input_labels = {**self._state.input_labels, n: data}
         elif code == "I00":
             self._handle_i00(data, pending)
         elif code == "I24":
@@ -270,16 +400,30 @@ class LumagenProtocol:
             pending.output_mode_raw = data
         else:
             _LOGGER.debug("Unhandled Lumagen code !%s,%s", code, data)
-            return
+            applied = False
 
-        pending.last_update_codes = touched
-        # Compare ignoring last_update_codes so that "no payload change"
-        # polls don't wake up listeners.
-        if self._state_matches_ignoring_codes(pending):
+        if applied:
+            pending.last_update_codes = touched
+            # Compare ignoring last_update_codes so that "no payload change"
+            # polls don't wake up listeners.
+            changed = not self._state_matches_ignoring_codes(pending)
             self._state = pending
-            return
-        self._state = pending
-        self._on_update(self._state, touched)
+            if changed:
+                self._on_update(self._state, touched)
+
+        # Observers run last, and unconditionally, so a client awaiting this
+        # code resumes only after state and state-listeners have settled.
+        self._notify_response(code, data)
+
+    def _notify_response(self, code: str, data: str) -> None:
+        """Fire every registered response observer for one response line."""
+        for observer in list(self._response_observers):
+            try:
+                observer(code, data)
+            except Exception:
+                _LOGGER.exception("Response observer raised; dropping it")
+                with suppress(ValueError):
+                    self._response_observers.remove(observer)
 
     def _state_matches_ignoring_codes(self, pending: LumagenState) -> bool:
         """Return True if ``pending`` equals current state but for the codes tuple."""
@@ -445,6 +589,94 @@ class LumagenProtocol:
         if len(fields) > _I24_VIRTUAL_INPUT:
             state.current_input = fields[_I24_VIRTUAL_INPUT]
 
+        LumagenProtocol._apply_i24_extended(fields, state)
+        LumagenProtocol._apply_derived(state)
+
+    @staticmethod
+    def _apply_i24_extended(fields: list[str], state: LumagenState) -> None:
+        """Documented ``!I24`` fields that used to be parsed and discarded.
+
+        Restricted to the I24/I25 path on purpose. I22 and I23 share these
+        positions per Tip0011, but I21's documented signature
+        (``!I21,M,RRR,VVVV,D,X,AAA,SSS,Y,C,B,PPP,QQQQ,ZZZ``) omits the ``T``
+        and ``WWWW`` fields that its own field list immediately below it
+        *does* define — so for I21 the doc contradicts itself about whether
+        everything from index 8 on is shifted by two. Rather than guess, the
+        shorter formats stay on :meth:`_apply_i2x_common`'s minimal set.
+
+        Every read is length-guarded and every conversion failure is
+        swallowed to a debug line: a truncated or malformed status line must
+        degrade to "field unknown", never abort the rest of the parse.
+        """
+        if len(fields) > _I24_SOURCE_3D_MODE:
+            state.source_3d_mode = fields[_I24_SOURCE_3D_MODE]
+        if len(fields) > _I24_INPUT_CONFIG:
+            state.input_config = fields[_I24_INPUT_CONFIG]
+        if len(fields) > _I24_NLS_ACTIVE:
+            # 'N' = NLS engaged, '-' = normal. Anything else is unexpected;
+            # leave the prior value rather than inventing a boolean.
+            nls = fields[_I24_NLS_ACTIVE]
+            if nls in ("N", "-"):
+                state.nls_active = nls == "N"
+        if len(fields) > _I24_OUTPUT_3D_MODE:
+            state.output_3d_mode = fields[_I24_OUTPUT_3D_MODE]
+        if len(fields) > _I24_OUTPUT_ENABLED:
+            raw_mask = fields[_I24_OUTPUT_ENABLED].strip()
+            try:
+                mask = int(raw_mask, 16)
+            except ValueError:
+                _LOGGER.debug("Could not parse output mask %r", raw_mask)
+            else:
+                state.output_enabled_mask = mask
+                state.active_outputs = decode_output_mask(mask)
+        if len(fields) > _I24_OUTPUT_CMS:
+            cms = _as_int(fields[_I24_OUTPUT_CMS], "output CMS")
+            if cms is not None:
+                state.output_cms = cms
+        if len(fields) > _I24_OUTPUT_STYLE:
+            style = _as_int(fields[_I24_OUTPUT_STYLE], "output style")
+            if style is not None:
+                state.output_style = style
+        if len(fields) > _I24_OUTPUT_ASPECT:
+            state.output_aspect = fields[_I24_OUTPUT_ASPECT]
+        if len(fields) > _I24_OUTPUT_MODE:
+            # The device sends output mode uppercase ('I'/'P') where source
+            # mode is lowercase. Lowercasing lets both share SourceMode
+            # instead of introducing a second enum for the same concept.
+            raw_mode = fields[_I24_OUTPUT_MODE].lower()
+            try:
+                state.output_scan_mode = SourceMode(raw_mode)
+            except ValueError:
+                _LOGGER.debug("Unknown output scan mode %r", raw_mode)
+        if len(fields) > _I24_PHYSICAL_INPUT:
+            state.physical_input = fields[_I24_PHYSICAL_INPUT]
+        if len(fields) > _I24_DETECTED_SOURCE_ASPECT:
+            state.detected_source_aspect = fields[_I24_DETECTED_SOURCE_ASPECT]
+        if len(fields) > _I24_DETECTED_CONTENT_ASPECT:
+            state.detected_content_aspect = fields[_I24_DETECTED_CONTENT_ASPECT]
+
+    @staticmethod
+    def _apply_derived(state: LumagenState) -> None:
+        """Decode the raw code fields into usable numbers.
+
+        Pure function of fields already parsed off the same line — no extra
+        query, no I/O. Runs at the end of every status-line path so the
+        derived values can never disagree with the raw ones they came from.
+        See :mod:`aiolumagen.formatting` for the decoders.
+        """
+        if state.source_vrate is not None:
+            state.source_refresh_hz = decode_vertical_rate(state.source_vrate)
+        if state.output_vrate is not None:
+            state.output_refresh_hz = decode_vertical_rate(state.output_vrate)
+        if state.source_resolution is not None and state.source_aspect is not None:
+            state.source_width = derive_horizontal_resolution(
+                state.source_resolution, state.source_aspect
+            )
+        if state.output_resolution is not None and state.output_aspect is not None:
+            state.output_width = derive_horizontal_resolution(
+                state.output_resolution, state.output_aspect
+            )
+
     @staticmethod
     def _apply_i25(data: str, state: LumagenState) -> None:
         """!I25 = Full v5 status, v4 layout + 2 trailing fields.
@@ -465,11 +697,27 @@ class LumagenProtocol:
                 state.input_memory = mem
         if len(fields) > _I25_POWER_STATE:
             state.power_on = fields[_I25_POWER_STATE] == "1"
+        # Indices 25/26 are empirical (see the module docstring). A firmware
+        # that stops at power leaves both unset rather than guessing.
+        if len(fields) > _I25_SUBTITLE_SHIFT:
+            shift = _SUBTITLE_SHIFT_MAP.get(fields[_I25_SUBTITLE_SHIFT])
+            if shift is not None:
+                state.subtitle_shift = shift
+        if len(fields) > _I25_AUTO_ASPECT:
+            auto = _AUTO_ASPECT_MAP.get(fields[_I25_AUTO_ASPECT])
+            if auto is not None:
+                # Note: deliberately does NOT set state.auto_aspect. That
+                # boolean stays sourced from the documented ZQI54 query so an
+                # unverified index can't corrupt a field consumers already
+                # rely on. Once this mapping is confirmed on hardware,
+                # folding the two together is a one-line change here.
+                state.auto_aspect_status = auto
 
     @staticmethod
     def _apply_i2x(data: str, state: LumagenState) -> None:
         """!I21/I22/I23 = older unsolicited formats (leading fields only)."""
         LumagenProtocol._apply_i2x_common(data.split(","), state)
+        LumagenProtocol._apply_derived(state)
 
     @staticmethod
     def _apply_i2x_common(fields: list[str], state: LumagenState) -> None:

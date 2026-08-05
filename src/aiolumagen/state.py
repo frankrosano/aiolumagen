@@ -64,6 +64,45 @@ class SharpnessSensitivity(StrEnum):
     NORMAL = "N"
 
 
+class SubtitleShift(StrEnum):
+    """Subtitle-shift amount, from the trailing ``!I25`` field at payload 25.
+
+    Mirrors the three levels the ``ZY553X`` setter writes. Values follow the
+    :class:`Colorspace` / :class:`InputStatus` precedent — a meaningful token
+    mapped from the numeric wire code (``0``/``1``/``2``), not the code itself.
+
+    **Empirically mapped, not documented.** ``ZQI25`` appears nowhere in
+    ``Tip0011_RS232CommandInterface_111023.pdf``, and this repo's own recorded
+    capture from firmware ``030225`` stops at payload 24 (power) — so on that
+    firmware this field is simply absent and stays ``None``. The index is a
+    hypothesis rather than a fact: verify against hardware before relying on
+    it, and see the Full v5 section of :mod:`aiolumagen.protocol` for the
+    evidence trail.
+    """
+
+    OFF = "Off"
+    PERCENT_3 = "3%"
+    PERCENT_6 = "6%"
+
+
+class AutoAspectStatus(StrEnum):
+    """Auto-aspect state, from the trailing ``!I25`` field at payload 26.
+
+    Richer than the boolean :attr:`LumagenState.auto_aspect` (which comes from
+    ``ZQI54``): the device distinguishes "off" from "disabled", where the
+    latter means auto-aspect is configured but currently inhibited.
+
+    Carries the same empirical caveat as :class:`SubtitleShift` — see that
+    docstring. Because this field is unverified it deliberately does **not**
+    feed :attr:`LumagenState.auto_aspect`, which stays sourced from the
+    documented ``ZQI54`` query.
+    """
+
+    OFF = "Off"
+    DISABLED = "Disabled"
+    ON = "On"
+
+
 class HdrGammaMode(StrEnum):
     """Gamma-mode flag in ``ZY417XXXXXG`` HDR intensity-mapping commands.
 
@@ -160,6 +199,92 @@ class LumagenState:
     hdr_status: HdrStatus | None = None
     source_mode: SourceMode | None = None
     full_status_raw: str | None = None
+
+    # --- Full status, extended source fields (from !I24 / !I25 only) ---
+    # These are documented in Tip0011's ZQI24 layout but were previously
+    # parsed and thrown away. Populated only on the !I24/!I25 path: the
+    # doc's !I21 signature contradicts its own field list about whether
+    # T/WWWW are present, so the shorter formats are left on the minimal
+    # shared field set rather than guessing.
+    input_config: str | None = None
+    """``X`` — active input config number for the current input resolution."""
+
+    source_3d_mode: str | None = None
+    """``D`` — source 3D mode code (0, 1, 2, 4, 8). ``0`` is 2D."""
+
+    nls_active: bool | None = None
+    """``Y`` — Non-Linear Stretch active (``N`` = on, ``-`` = normal)."""
+
+    physical_input: str | None = None
+    """``KK`` — physical input backing the current virtual input (1-19).
+
+    :attr:`current_input` is the *virtual* input the user selected; this is
+    the HDMI port actually feeding it. They differ whenever input configs
+    remap ports.
+    """
+
+    detected_source_aspect: str | None = None
+    """``JJJ`` — raster aspect the device *detected*, vs :attr:`source_aspect`
+    which is the one currently *applied*. The pair is what makes auto-aspect
+    behaviour explainable."""
+
+    detected_content_aspect: str | None = None
+    """``LLL`` — detected content aspect, counterpart to
+    :attr:`content_aspect`."""
+
+    # --- Full status, extended output fields (from !I24 / !I25 only) ---
+    output_aspect: str | None = None
+    """``ZZZ`` — output raster aspect code (e.g. ``178``)."""
+
+    output_scan_mode: SourceMode | None = None
+    """``H`` — output scan mode. Shares :class:`SourceMode` with
+    :attr:`source_mode`; the device sends this field uppercase (``I``/``P``)
+    and the parser lowercases before coercion. Distinct from
+    :attr:`output_mode_raw`, which is the whole ``!O01`` payload."""
+
+    output_3d_mode: str | None = None
+    """``T`` — output 3D mode code (0, 1, 2, 4, 8)."""
+
+    output_enabled_mask: int | None = None
+    """``WWWW`` — 16-bit output-enable bitmask, parsed from hex. Bit 0 is
+    output 1. See :attr:`active_outputs` for the decoded form."""
+
+    active_outputs: tuple[int, ...] | None = None
+    """1-based output numbers currently enabled, decoded from
+    :attr:`output_enabled_mask`. An empty tuple means all outputs off, which
+    is a real state — distinct from ``None`` ("not observed")."""
+
+    output_cms: int | None = None
+    """``C`` — active output CMS (0-7)."""
+
+    output_style: int | None = None
+    """``B`` — active output style (0-7)."""
+
+    # --- Derived values (decoded from the raw code fields above) ---
+    # Computed by the parser from fields already on the wire — no extra
+    # queries. See :mod:`aiolumagen.formatting` for the decoders.
+    source_refresh_hz: float | None = None
+    """:attr:`source_vrate` decoded to Hz (``059`` -> ``59.94``)."""
+
+    output_refresh_hz: float | None = None
+    """:attr:`output_vrate` decoded to Hz."""
+
+    source_width: int | None = None
+    """Source display width derived from :attr:`source_resolution` and
+    :attr:`source_aspect`. The Lumagen never reports width directly."""
+
+    output_width: int | None = None
+    """Output display width derived from :attr:`output_resolution` and
+    :attr:`output_aspect`."""
+
+    # --- Full v5 trailing fields, empirically mapped ---
+    subtitle_shift: SubtitleShift | None = None
+    """Payload index 25. See :class:`SubtitleShift` for the caveat — absent on
+    firmware ``030225`` and unverified anywhere."""
+
+    auto_aspect_status: AutoAspectStatus | None = None
+    """Payload index 26. See :class:`AutoAspectStatus`. Deliberately does not
+    feed :attr:`auto_aspect`, which stays sourced from ``ZQI54``."""
 
     # --- Output mode (from !O01) ---
     output_mode_raw: str | None = None

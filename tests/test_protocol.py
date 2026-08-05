@@ -519,3 +519,288 @@ def test_reset_clears_pending_label_input() -> None:
     assert proto.pending_label_input is None
     proto.feed_bytes(b"!S1A,Late\r\n")
     assert proto.state.input_labels == {}
+
+
+# ---------- Extended !I24 / !I25 fields (previously parsed and discarded) ----------
+
+# The same real Full v5 capture used above: firmware 030225, input 1 active,
+# 4K SDR source, 4K progressive output. 25 payload fields (0-24) — note it
+# ends at power, with nothing at 25/26.
+I25_REAL_CAPTURE = (
+    b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
+    b"01,01,178,178,A,1\r\n"
+)
+
+
+def test_i25_populates_extended_source_fields() -> None:
+    """Documented ZQI24 source fields that used to be dropped on the floor."""
+    updates, proto = _collect()
+    proto.feed_bytes(I25_REAL_CAPTURE)
+    state, _ = updates[-1]
+    assert state.source_3d_mode == "0"  # [3] D
+    assert state.input_config == "0"  # [4] X
+    assert state.nls_active is False  # [7] Y = '-' (normal)
+    assert state.physical_input == "01"  # [20] KK
+    assert state.detected_source_aspect == "178"  # [21] JJJ
+    assert state.detected_content_aspect == "178"  # [22] LLL
+
+
+def test_i25_populates_extended_output_fields() -> None:
+    updates, proto = _collect()
+    proto.feed_bytes(I25_REAL_CAPTURE)
+    state, _ = updates[-1]
+    assert state.output_3d_mode == "0"  # [8] T
+    assert state.output_enabled_mask == 0x000E  # [9] WWWW
+    assert state.active_outputs == (2, 3, 4)  # decoded from the mask
+    assert state.output_cms == 0  # [10] C
+    assert state.output_style == 0  # [11] B
+    assert state.output_aspect == "237"  # [14] ZZZ
+    # [18] H arrives uppercase ('P') where source mode is lowercase; both
+    # share SourceMode rather than introducing a second enum.
+    assert state.output_scan_mode is SourceMode.PROGRESSIVE
+
+
+def test_i25_nls_engaged_reads_as_true() -> None:
+    """Y = 'N' means NLS is engaged — the letter is not a boolean 'no'."""
+    updates, proto = _collect()
+    proto.feed_bytes(
+        b"!I25,1,059,2160,0,0,178,178,N,0,000e,0,0,059,2160,237,2,0,p,P,"
+        b"01,01,178,178,A,1\r\n"
+    )
+    assert updates[-1][0].nls_active is True
+
+
+def test_i25_derives_refresh_rates_and_widths() -> None:
+    """Derived values come free off the same line — no extra query.
+
+    The Lumagen never reports horizontal resolution, and reports rate as a
+    truncated integer, so both have to be computed. See
+    :mod:`aiolumagen.formatting`.
+    """
+    updates, proto = _collect()
+    proto.feed_bytes(I25_REAL_CAPTURE)
+    state, _ = updates[-1]
+    assert state.source_refresh_hz == pytest.approx(59.94)
+    assert state.output_refresh_hz == pytest.approx(59.94)
+    # 2160 x 1.78 = 3844.8, snapped to the standard 3840.
+    assert state.source_width == 3840
+    # 2160 x 2.37 = 5119.2 — too far from any standard width to snap, so the
+    # computed value is kept rather than forced to 4096.
+    assert state.output_width == 5119
+
+
+def test_i25_real_capture_has_no_subtitle_or_auto_aspect_fields() -> None:
+    """Firmware 030225 stops at power (index 24), so 25/26 stay None.
+
+    Pinning this keeps the empirical mapping honest: the fields are read behind
+    a length guard precisely because this capture proves they aren't universal.
+    """
+    updates, proto = _collect()
+    proto.feed_bytes(I25_REAL_CAPTURE)
+    state, _ = updates[-1]
+    assert state.subtitle_shift is None
+    assert state.auto_aspect_status is None
+    # ...while the fields that ARE present still decode.
+    assert state.power_on is True
+    assert state.input_memory == "A"
+
+
+def test_i25_with_trailing_fields_decodes_subtitle_and_auto_aspect() -> None:
+    """Payload 25 = subtitle shift, 26 = auto aspect status (empirical).
+
+    These indices are a hypothesis, not documented behaviour: absent from
+    Tip0011 (which predates Full v5) and absent from every capture in this
+    repo. The test pins the mapping we implement, so if hardware ever
+    contradicts it this is the one place to correct.
+    """
+    from aiolumagen.state import AutoAspectStatus, SubtitleShift
+
+    updates, proto = _collect()
+    proto.feed_bytes(
+        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
+        b"01,01,178,178,A,1,2,2\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.subtitle_shift is SubtitleShift.PERCENT_6  # '2' = 6%
+    assert state.auto_aspect_status is AutoAspectStatus.ON  # '2' = on
+
+
+def test_i25_auto_aspect_status_distinguishes_off_from_disabled() -> None:
+    """The tri-state is the reason to carry this field at all.
+
+    ZQI54's boolean can't express "configured but currently inhibited".
+    """
+    from aiolumagen.state import AutoAspectStatus
+
+    updates, proto = _collect()
+    base = (
+        "!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
+        "01,01,178,178,A,1,0,{}\r\n"
+    )
+    proto.feed_bytes(base.format("0").encode("ascii"))
+    assert updates[-1][0].auto_aspect_status is AutoAspectStatus.OFF
+    proto.feed_bytes(base.format("1").encode("ascii"))
+    assert updates[-1][0].auto_aspect_status is AutoAspectStatus.DISABLED
+    proto.feed_bytes(base.format("2").encode("ascii"))
+    assert updates[-1][0].auto_aspect_status is AutoAspectStatus.ON
+
+
+def test_i25_auto_aspect_status_does_not_touch_the_zqi54_boolean() -> None:
+    """The unverified push index must not overwrite the documented query's field.
+
+    ``auto_aspect`` stays sourced from ZQI54 so a wrong guess at index 26 can
+    only add an unknown field, never corrupt one consumers already use.
+    """
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I54,1\r\n")  # ZQI54 says auto aspect is on
+    assert updates[-1][0].auto_aspect is True
+
+    # A push claiming "off" at index 26 updates only the status enum.
+    proto.feed_bytes(
+        b"!I25,1,059,2160,0,0,178,178,-,0,000e,0,0,059,2160,237,2,0,p,P,"
+        b"01,01,178,178,A,1,0,0\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.auto_aspect is True  # untouched
+    assert state.auto_aspect_status is not None  # but the enum landed
+
+
+def test_i25_malformed_extended_fields_do_not_erase_good_state() -> None:
+    """A garbled line degrades to "field unknown", never wipes a prior value."""
+    updates, proto = _collect()
+    proto.feed_bytes(I25_REAL_CAPTURE)
+    assert updates[-1][0].output_cms == 0
+    assert updates[-1][0].output_enabled_mask == 0x000E
+
+    # Same line with junk in the CMS and mask fields.
+    proto.feed_bytes(
+        b"!I25,1,059,2160,0,0,178,178,-,0,zzzz,?,0,059,2160,237,2,0,p,P,"
+        b"01,01,178,178,A,1\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.output_cms == 0  # kept
+    assert state.output_enabled_mask == 0x000E  # kept
+
+
+def test_extended_fields_are_not_applied_to_i21() -> None:
+    """!I21 stays on the minimal shared field set, on purpose.
+
+    Tip0011's !I21 signature omits the T and WWWW fields that its own field
+    list immediately below it defines, so it's ambiguous whether everything
+    from index 8 on is shifted by two. Reading extended fields there would be
+    a guess; leaving them None is not.
+    """
+    updates, proto = _collect()
+    proto.feed_bytes(b"!I21,1,060,1080,0,0,178,178,-,0,1920,0,0,060,1080\r\n")
+    state, _ = updates[-1]
+    # Shared leading fields still parse.
+    assert state.input_status is InputStatus.ACTIVE
+    assert state.source_resolution == "1080"
+    # Extended fields deliberately untouched.
+    assert state.nls_active is None
+    assert state.output_enabled_mask is None
+    assert state.output_cms is None
+    assert state.physical_input is None
+
+
+def test_i24_also_gets_extended_fields() -> None:
+    """The extended set applies to the whole I24/I25 path, not just v5."""
+    updates, proto = _collect()
+    proto.feed_bytes(
+        b"!I24,1,059,2160,0,0,178,178,N,0,0003,2,1,059,2160,178,2,0,p,P,"
+        b"01,02,178,178\r\n"
+    )
+    state, _ = updates[-1]
+    assert state.nls_active is True
+    assert state.active_outputs == (1, 2)
+    assert state.output_cms == 2
+    assert state.output_style == 1
+    assert state.physical_input == "02"
+    assert state.source_width == 3840
+
+
+# ---------- Response observers (correlation hook) ----------
+
+
+def test_response_observer_fires_for_each_line() -> None:
+    _updates, proto = _collect()
+    seen: list[tuple[str, str]] = []
+    proto.add_response_observer(lambda code, payload: seen.append((code, payload)))
+    proto.feed_bytes(b"!S02,1\r\n!S00\r\n")
+    assert seen == [("S02", "1"), ("S00", "")]
+
+
+def test_response_observer_fires_when_state_is_unchanged() -> None:
+    """Broader than the state-update callback, which dedupes no-op responses.
+
+    This is what makes the observer usable for correlation: a repeated poll
+    still resolves a waiter even though no listener is woken.
+    """
+    updates, proto = _collect()
+    seen: list[str] = []
+    proto.add_response_observer(lambda code, _payload: seen.append(code))
+    proto.feed_bytes(b"!S02,1\r\n")
+    proto.feed_bytes(b"!S02,1\r\n")  # identical — no state change
+    assert len(updates) == 1  # state listener suppressed
+    assert seen == ["S02", "S02"]  # observer not suppressed
+
+
+def test_response_observer_fires_for_unhandled_codes() -> None:
+    """A caller can await a code the parser has no handler for."""
+    updates, proto = _collect()
+    seen: list[tuple[str, str]] = []
+    proto.add_response_observer(lambda code, payload: seen.append((code, payload)))
+    proto.feed_bytes(b"!I99,whatever\r\n")
+    assert updates == []  # no state change
+    assert seen == [("I99", "whatever")]
+
+
+def test_response_observer_sees_committed_state() -> None:
+    """Observers run after the new state is swapped in, so reads are fresh."""
+    _updates, proto = _collect()
+    observed: list[bool | None] = []
+    proto.add_response_observer(
+        lambda _code, _payload: observed.append(proto.state.power_on)
+    )
+    proto.feed_bytes(b"!S02,1\r\n")
+    assert observed == [True]
+
+
+def test_response_observer_unregister() -> None:
+    _updates, proto = _collect()
+    seen: list[str] = []
+    unregister = proto.add_response_observer(
+        lambda code, _payload: seen.append(code)
+    )
+    proto.feed_bytes(b"!S02,1\r\n")
+    unregister()
+    proto.feed_bytes(b"!S02,0\r\n")
+    assert seen == ["S02"]
+
+
+def test_raising_response_observer_is_dropped_not_propagated() -> None:
+    """A bad observer must not break parsing for everyone else."""
+    _updates, proto = _collect()
+    seen: list[str] = []
+
+    def _boom(_code: str, _payload: str) -> None:
+        raise RuntimeError("observer is broken")
+
+    proto.add_response_observer(_boom)
+    proto.add_response_observer(lambda code, _payload: seen.append(code))
+    proto.feed_bytes(b"!S02,1\r\n")
+    proto.feed_bytes(b"!S02,0\r\n")
+    # The healthy observer keeps receiving; the broken one was dropped after
+    # its first raise.
+    assert seen == ["S02", "S02"]
+
+
+def test_reset_keeps_response_observers() -> None:
+    """The client registers its correlation observer once and expects it to
+    survive a reconnect, which calls reset()."""
+    _updates, proto = _collect()
+    seen: list[str] = []
+    proto.add_response_observer(lambda code, _payload: seen.append(code))
+    proto.reset()
+    proto.feed_bytes(b"!S02,1\r\n")
+    assert seen == ["S02"]

@@ -12,6 +12,14 @@ The startup handshake is built around two short retries (2 attempts at
 up as soon as the transport connects, so in steady-state operation the
 first attempt succeeds and the retry only matters when we attach while
 the bridge is still booting.
+
+Most traffic here is fire-and-forget, matching the device: commands take no
+acknowledgement and status arrives unsolicited. Where an answer is genuinely
+required — the handshake's ``!S01`` gate and ``!I25`` support probe, and
+per-input label discovery — :meth:`LumagenClient.query_and_wait` correlates
+the reply to the query through a future keyed on the response code. See the
+"Request/response correlation" section for why that's a narrow waiter rather
+than a serialized command queue.
 """
 
 from __future__ import annotations
@@ -112,6 +120,19 @@ class LumagenClient:
     means the pre-v5 warning fires on healthy devices.
     """
 
+    RESPONSE_TIMEOUT = 5.0
+    """Default deadline for :meth:`query_and_wait` / :meth:`wait_for_response`."""
+
+    LABEL_QUERY_TIMEOUT = 2.0
+    """Per-input deadline for :meth:`query_input_labels`.
+
+    A label reply is ~15 characters, about 15 ms of wire time at 9600 baud, so
+    this is mostly slack for the ESPHome/serial path. It's a *deadline*, not a
+    delay: a device that answers promptly (the normal case) moves straight to
+    the next input, which is why label discovery is now bounded by the
+    device's actual latency rather than 8 fixed sleeps.
+    """
+
     def __init__(
         self,
         transport: _TransportLike,
@@ -147,6 +168,11 @@ class LumagenClient:
         self._started = False
         self._last_response_time: float | None = None
         self._available = False
+        # Response-code -> futures awaiting that code. Populated by
+        # _register_waiter and drained by _on_response; see the
+        # "Request/response correlation" section below.
+        self._response_waiters: dict[str, list[asyncio.Future[str]]] = {}
+        self._protocol.add_response_observer(self._on_response)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -188,6 +214,7 @@ class LumagenClient:
             with suppress(asyncio.CancelledError):
                 await self._refresh_task
             self._refresh_task = None
+        self._fail_waiters("Client stopped while awaiting a response")
         await self._transport.disconnect()
         self._started = False
 
@@ -232,6 +259,170 @@ class LumagenClient:
             with suppress(ValueError):
                 self._listeners.remove(listener)
         return _unsubscribe
+
+    # ------------------------------------------------------------------
+    # Request/response correlation
+    # ------------------------------------------------------------------
+    #
+    # The Lumagen link is not a request/response protocol: commands are
+    # fire-and-forget and status arrives whenever the device feels like
+    # sending it. That's the right default and it's what makes the push path
+    # work. But a few operations genuinely need an answer before they can
+    # proceed, and for those "send, then sleep and hope" is not good enough:
+    #
+    #   * Label discovery. The Lumagen has no bulk label query and each
+    #     !S1x reply names only the memory letter, not the input — so the
+    #     queries must be serialized and each reply attributed to the input
+    #     that was just asked about. A fixed sleep either wastes time or
+    #     misattributes a slow reply to the *next* input.
+    #   * The startup handshake, which gates its retry on !S01 arriving and
+    #     its Full-v5 warning on !I25 arriving with a non-empty payload.
+    #   * Consumers validating a connection (ha-lumagen's config flow) that
+    #     want "did this device answer?" as a value, not a state poll.
+    #
+    # The mechanism is deliberately narrow: a dict of futures keyed by
+    # response code, fed by a protocol-layer observer. It is NOT a serialized
+    # command queue — commands still go out immediately, and the unsolicited
+    # push stream is never blocked behind an in-flight transaction.
+
+    @staticmethod
+    def _normalize_code(code: str) -> str:
+        """Accept either ``"!S01"`` or ``"S01"`` and return the bare code."""
+        return code[1:] if code.startswith("!") else code
+
+    @staticmethod
+    def _infer_response_code(command: str) -> str:
+        """Derive the response code a query will be answered with.
+
+        Only the plain 5-character ``ZQxxx`` form is inferable (``ZQS01`` ->
+        ``S01``). Anything else — notably the label query ``ZQS1A0``, whose
+        reply is ``!S1A`` and drops the input digit — must say so explicitly
+        via ``expect=``, because guessing there would silently wait on a code
+        the device will never send.
+        """
+        if len(command) == 5 and command.startswith("ZQ"):
+            return command[2:]
+        raise LumagenCommandError(
+            f"cannot infer the response code for {command!r}; "
+            "pass expect='<code>' explicitly"
+        )
+
+    def _register_waiter(self, code: str) -> asyncio.Future[str]:
+        """Create a future that resolves with the next ``code`` payload."""
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._response_waiters.setdefault(code, []).append(future)
+        return future
+
+    def _discard_waiter(self, code: str, future: asyncio.Future[str]) -> None:
+        """Remove a waiter, whether it resolved, timed out, or was abandoned."""
+        waiters = self._response_waiters.get(code)
+        if waiters is None:
+            return
+        with suppress(ValueError):
+            waiters.remove(future)
+        if not waiters:
+            del self._response_waiters[code]
+
+    def _on_response(self, code: str, payload: str) -> None:
+        """Protocol observer: resolve every waiter registered for ``code``.
+
+        All waiters on a code are resolved, not just the first — broadcasting
+        avoids an arbitrary "who gets this reply" rule when two callers happen
+        to await the same code, and each gets the identical payload anyway.
+        """
+        waiters = self._response_waiters.pop(code, None)
+        if not waiters:
+            return
+        for future in waiters:
+            if not future.done():
+                future.set_result(payload)
+
+    def _fail_waiters(self, reason: str) -> None:
+        """Fail all pending waiters — the reply they're waiting for isn't coming.
+
+        Called on :meth:`stop` and before a forced reconnect. Uses an
+        exception rather than cancellation so the failure arrives at the
+        caller as a normal, catchable
+        :class:`~aiolumagen.exceptions.LumagenConnectionError` instead of a
+        ``CancelledError`` that would tear through any surrounding task.
+        """
+        waiters = self._response_waiters
+        self._response_waiters = {}
+        for futures in waiters.values():
+            for future in futures:
+                if not future.done():
+                    future.set_exception(LumagenConnectionError(reason))
+
+    async def wait_for_response(
+        self, code: str, *, timeout: float | None = None
+    ) -> str:
+        """Wait for the next response with ``code`` and return its payload.
+
+        For *unsolicited* responses — use :meth:`query_and_wait` when you're
+        also sending the query, since that registers the waiter before the
+        write and so can't miss a reply that arrives immediately.
+
+        :param code: Response code, with or without the leading ``!``
+            (``"S01"`` and ``"!S01"`` are equivalent).
+        :param timeout: Seconds to wait; defaults to :attr:`RESPONSE_TIMEOUT`.
+        :raises TimeoutError: the builtin, if nothing arrives in time. This
+            library deliberately has no timeout exception of its own — see
+            :mod:`aiolumagen.exceptions` — so consumers already catching
+            ``TimeoutError`` around ``asyncio.timeout`` need no changes.
+        :raises LumagenConnectionError: if the client stops or reconnects
+            while waiting.
+        """
+        normalized = self._normalize_code(code)
+        limit = self.RESPONSE_TIMEOUT if timeout is None else timeout
+        future = self._register_waiter(normalized)
+        try:
+            async with asyncio.timeout(limit):
+                return await future
+        finally:
+            self._discard_waiter(normalized, future)
+
+    async def query_and_wait(
+        self,
+        command: str,
+        *,
+        expect: str | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Send ``command`` and return the payload of its matching response.
+
+        The waiter is registered *before* the write, so a device that answers
+        within the same event-loop tick (or a transport that echoes
+        synchronously, as the test fake does) can't be missed.
+
+        :param command: The query to send, e.g. ``"ZQS01"``.
+        :param expect: Response code to wait for. Inferred from the plain
+            ``ZQxxx`` form when omitted; required otherwise (see
+            :meth:`_infer_response_code`).
+        :param timeout: Seconds to wait; defaults to :attr:`RESPONSE_TIMEOUT`.
+        :returns: The response payload — the text after the code, ``""`` for
+            an empty one. **An empty string is a meaningful result**: the
+            Lumagen answers any syntactically valid ``ZQ`` code by echoing it
+            with no payload, so ``""`` means "the device replied but doesn't
+            support this query", not "no reply".
+        :raises TimeoutError: the builtin, if no matching response arrives.
+        :raises LumagenConnectionError: on a transport failure, or if the
+            client stops or reconnects while waiting.
+        :raises LumagenCommandError: if ``expect`` is omitted for a command
+            whose response code can't be inferred.
+        """
+        code = (
+            self._normalize_code(expect)
+            if expect is not None
+            else self._infer_response_code(command)
+        )
+        limit = self.RESPONSE_TIMEOUT if timeout is None else timeout
+        future = self._register_waiter(code)
+        try:
+            await self.send_command(command, refresh=False)
+            async with asyncio.timeout(limit):
+                return await future
+        finally:
+            self._discard_waiter(code, future)
 
     # ------------------------------------------------------------------
     # Commands
@@ -362,7 +553,7 @@ class LumagenClient:
             _LOGGER.debug("Secondary status query failed (transport down): %s", err)
 
     async def query_input_labels(
-        self, memory: str = "A", *, settle: float = 0.15
+        self, memory: str = "A", *, timeout: float | None = None
     ) -> None:
         """Query configured labels for inputs 1-8 into :attr:`state.input_labels`.
 
@@ -370,18 +561,28 @@ class LumagenClient:
         (``!S1x,<label>``) reports only the memory letter — not the input
         number. So this serializes: it primes the parser with the input it's
         about to ask for (:meth:`LumagenProtocol.expect_input_label`), sends
-        the ``ZQS1XY`` query, then waits ``settle`` seconds for the reply to
-        land before moving on. ``settle`` must comfortably exceed the
-        round-trip time — a ~15-char reply at 9600 baud is ~15 ms, so the
-        0.15 s default leaves ample slack for the ESPHome/serial path.
+        the ``ZQS1XY`` query, and **awaits the actual reply** before moving
+        on.
+
+        That await replaced a fixed 0.15 s sleep per input. Two things were
+        wrong with the sleep: it spent 1.2 s unconditionally even when the
+        device answered in 20 ms, and a reply slower than the window landed
+        while the *next* input was already primed — silently attributing one
+        input's label to another. A deadline can only ever drop a label, never
+        misfile one, and the primer is cleared on timeout to guarantee that.
 
         :param memory: Input memory to read labels from, ``A``-``D``. Labels
             are stored per (input, memory); ``A`` is the default/primary bank.
-        :param settle: Seconds to wait for each response before the next query.
+        :param timeout: Per-input deadline; defaults to
+            :attr:`LABEL_QUERY_TIMEOUT`.
 
         Inputs the device doesn't answer for (unpopulated inputs, or firmware
-        without ``ZQS1`` support) are simply left unset — this never raises on
-        a missing response, only on an invalid ``memory`` argument.
+        without ``ZQS1`` support) are simply left unset — a missing response
+        never raises. An invalid ``memory`` raises
+        :class:`~aiolumagen.exceptions.LumagenCommandError`, and a transport
+        failure propagates as
+        :class:`~aiolumagen.exceptions.LumagenConnectionError` (there's no
+        point continuing the loop once the link is down).
         """
         # Note: this is NOT the same vocabulary as the Memory enum. Memory
         # holds the lowercase memory-*recall* commands (``a``-``d``); the
@@ -392,11 +593,28 @@ class LumagenClient:
             raise LumagenCommandError(
                 f"input-label memory must be 'A'-'D', got {memory!r}"
             )
+        limit = self.LABEL_QUERY_TIMEOUT if timeout is None else timeout
+        # ZQS1A0 is answered with !S1A — the input digit is absent from the
+        # reply, which is exactly why expect= can't be inferred here.
+        expect = f"S1{memory}"
         for input_number in range(1, 9):
             self._protocol.expect_input_label(input_number)
             # ZQS1XY: X = memory letter, Y = input - 1 (so '0' for input 1).
-            await self.send_command(f"ZQS1{memory}{input_number - 1}")
-            await asyncio.sleep(settle)
+            try:
+                await self.query_and_wait(
+                    f"ZQS1{memory}{input_number - 1}",
+                    expect=expect,
+                    timeout=limit,
+                )
+            except TimeoutError:
+                # Clear the primer so a late reply can't be misattributed to
+                # the next input in the loop.
+                self._protocol.expect_input_label(None)
+                _LOGGER.debug(
+                    "No label response for input %d (memory %s)",
+                    input_number,
+                    memory,
+                )
 
     async def set_sharpness(
         self,
@@ -530,27 +748,23 @@ class LumagenClient:
         waits for the esphome integration first.
         """
         max_retries = 2
-        retry_interval = 1.5  # seconds between attempts
+        retry_interval = 1.5  # per-attempt deadline for the !S01 reply
 
         for attempt in range(max_retries):
             try:
                 await self.send_command(ECHO_OFF_WITH_STATUS)
                 await asyncio.sleep(0.3)
-                await self.query_device_info()
-                await asyncio.sleep(0.3)
-                await self.query_power()
-                await asyncio.sleep(0.3)
-                await self.query_input_info()
-                await asyncio.sleep(0.3)
-                await self.query_full_status()
+                # Await !S01 instead of firing every query blind and then
+                # polling state: the reply both proves the device is
+                # listening and gates the retry. Nothing else is sent until
+                # it lands, so a dead link costs one command, not five.
+                await self.query_and_wait(
+                    Query.DEVICE_INFO.value, timeout=retry_interval
+                )
             except LumagenConnectionError:
                 _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
                 return
-
-            # Wait for !S01 to confirm the Lumagen actually received our queries.
-            if not await self._wait_for(
-                lambda: self._protocol.state.model is not None, retry_interval
-            ):
+            except TimeoutError:
                 if attempt < max_retries - 1:
                     _LOGGER.debug(
                         "Lumagen startup attempt %d/%d got no response, retrying",
@@ -562,19 +776,32 @@ class LumagenClient:
             _LOGGER.debug(
                 "Lumagen startup handshake succeeded on attempt %d", attempt + 1
             )
-            # ZQI25 went out moments ago and its reply cannot have arrived yet
-            # — !S01 is a much shorter line and beats it back every time. Give
-            # the status reply its own window before judging v5 support, or the
-            # check below races it and warns on a perfectly healthy device.
-            got_status = await self._wait_for(
-                lambda: bool(self._protocol.state.full_status_raw),
-                self.FULL_STATUS_WAIT,
-            )
+            try:
+                # Power and input info also ride the !I25 push, so these stay
+                # fire-and-forget — awaiting them would add two more deadlines
+                # to startup for data that arrives anyway.
+                await self.query_power()
+                await asyncio.sleep(0.3)
+                await self.query_input_info()
+                await asyncio.sleep(0.3)
+                # An empty payload here is the real signal for pre-v5
+                # firmware: the device answers any valid ZQ code by echoing
+                # it with nothing after the comma. Correlation gives us that
+                # payload directly, so the check is now on the response
+                # itself rather than inferred from state truthiness.
+                status = await self.query_and_wait(
+                    Query.FULL_STATUS_V5.value, timeout=self.FULL_STATUS_WAIT
+                )
+            except LumagenConnectionError:
+                _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
+                return
+            except TimeoutError:
+                status = ""
             # The Full v5 push doesn't carry sharpness / game mode / auto
             # aspect / HDR-mapping state — pull those once now so entities
             # don't sit at "unknown" until the first poll.
             await self._query_secondary_status()
-            if not got_status:
+            if not status:
                 self._warn_no_full_status()
             return
 
@@ -584,30 +811,6 @@ class LumagenClient:
             max_retries,
             max_retries * retry_interval,
         )
-
-    async def _wait_for(
-        self,
-        predicate: Callable[[], bool],
-        timeout: float,
-        *,
-        interval: float = 0.1,
-    ) -> bool:
-        """Poll ``predicate`` until it's true or ``timeout`` elapses.
-
-        Returns whether it came true. Deliberately a private poller rather
-        than a future/event: the protocol layer is synchronous and has no
-        notion of waiters, and startup is the only caller. If more callers
-        appear, promote this to a public ``wait_for_state`` with real waiter
-        registration instead of scattering polls.
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            if predicate():
-                return True
-            if loop.time() >= deadline:
-                return False
-            await asyncio.sleep(interval)
 
     def _warn_no_full_status(self) -> None:
         """Warn that the device identified itself but never reported status.
@@ -733,6 +936,11 @@ class LumagenClient:
                     for listener in list(self._listeners):
                         with suppress(Exception):
                             listener(self._protocol.state, ("_unavailable",))
+                    # Anything still awaiting a reply is waiting on a
+                    # subscription we're about to throw away.
+                    self._fail_waiters(
+                        "Transport reconnecting; response will not arrive"
+                    )
                     try:
                         await self._transport.disconnect()
                         await asyncio.sleep(1.0)

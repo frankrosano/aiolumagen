@@ -31,9 +31,10 @@ from aiolumagen.state import HdrGammaMode, SharpnessSensitivity
 class Input(StrEnum):
     """Direct input-select commands (1-8 buttons).
 
-    For inputs 9+ on models that support them, use
-    :meth:`~aiolumagen.client.LumagenClient.send_command` with ``iN`` where
-    N is the input number.
+    For inputs 9-19 on models that support them, do **not** hand-build the
+    command — the encoding changes above 9 (see :func:`input_command`). Use
+    :meth:`~aiolumagen.client.LumagenClient.set_input`, which routes through
+    that encoder.
     """
 
     INPUT_1 = "i1"
@@ -134,10 +135,28 @@ ECHO_OFF_WITH_STATUS = "ZE2"
 
 
 def input_command(n: int) -> str:
-    """Return the command string to select input ``n`` (1-19)."""
+    """Return the command string to select input ``n`` (1-19).
+
+    Inputs 1-9 are ``i`` followed by the digit. **Inputs 10-19 are not
+    ``i10``-``i19``** — Tip0011's command table spells this out twice:
+
+        ``INPUT`` / ``i`` — Choose input (i.e. ``i2`` for input 2 and
+        ``i+2`` for input 12)
+
+        ``10+`` / ``+`` — Add 10 to the next digit entered for input
+        selection
+
+    So ``+`` is a prefix modifier consumed by the *next* digit, and input 12
+    is ``i+2``. This function previously emitted ``f"i{n}"`` across the whole
+    1-19 range, which for n>=10 sent ``i1`` (select input 1) followed by a
+    stray digit the device treats as menu input. It was silently wrong — a
+    valid command sequence for the wrong operation, so nothing rejected it.
+    """
     if not 1 <= n <= 19:
         raise LumagenCommandError(f"input must be 1-19, got {n}")
-    return f"i{n}"
+    if n <= 9:
+        return f"i{n}"
+    return f"i+{n - 10}"
 
 
 def sharpness_command(
