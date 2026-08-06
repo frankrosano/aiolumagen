@@ -38,8 +38,15 @@ from aiolumagen.commands import (
     game_mode_command,
     hdr_intensity_mapping_command,
     input_command,
+    input_label_command,
+    input_restart_command,
+    osd_block_char_command,
+    osd_clear_command,
+    osd_message_command,
     reset_auto_aspect_command,
+    save_config_command,
     sharpness_command,
+    show_aspect_command,
     subtitle_shift_command,
 )
 from aiolumagen.exceptions import (
@@ -617,27 +624,171 @@ class LumagenClient:
         if memory not in ("A", "B", "C", "D"):
             raise LumagenCommandError(f"input-label memory must be 'A'-'D', got {memory!r}")
         limit = self.LABEL_QUERY_TIMEOUT if timeout is None else timeout
-        # ZQS1A0 is answered with !S1A — the input digit is absent from the
-        # reply, which is exactly why expect= can't be inferred here.
-        expect = f"S1{memory}"
         for input_number in range(1, 9):
-            self._protocol.expect_input_label(input_number)
-            # ZQS1XY: X = memory letter, Y = input - 1 (so '0' for input 1).
-            try:
-                await self.query_and_wait(
-                    f"ZQS1{memory}{input_number - 1}",
-                    expect=expect,
-                    timeout=limit,
-                )
-            except TimeoutError:
-                # Clear the primer so a late reply can't be misattributed to
-                # the next input in the loop.
-                self._protocol.expect_input_label(None)
-                _LOGGER.debug(
-                    "No label response for input %d (memory %s)",
-                    input_number,
-                    memory,
-                )
+            await self._read_input_label(input_number, memory, limit)
+
+    async def _read_input_label(self, input_number: int, memory: str, timeout: float) -> bool:
+        """Query one input's label and wait for it. Returns whether it landed.
+
+        Shared by :meth:`query_input_labels` and :meth:`set_input_label` so the
+        prime/send/await/clear-on-timeout sequence exists once. Getting that
+        sequence wrong is how a label ends up filed under the wrong input, so
+        it should not be written twice.
+        """
+        self._protocol.expect_input_label(input_number)
+        # ZQS1XY: X = memory letter, Y = input - 1 (so '0' for input 1). The
+        # reply is !S1X — the input digit is absent from it, which is exactly
+        # why expect= can't be inferred from the command here.
+        try:
+            await self.query_and_wait(
+                f"ZQS1{memory}{input_number - 1}",
+                expect=f"S1{memory}",
+                timeout=timeout,
+            )
+        except TimeoutError:
+            # Clear the primer so a late reply can't be misattributed to
+            # whichever input is asked about next.
+            self._protocol.expect_input_label(None)
+            _LOGGER.debug("No label response for input %d (memory %s)", input_number, memory)
+            return False
+        return True
+
+    async def set_input_label(self, input_number: int, label: str, *, memory: str = "A") -> None:
+        """Write an input's label via ``ZY524``, then read it back.
+
+        The read-back matters more here than for other setters: the device
+        silently truncates or rejects a label it won't store, so writing
+        without confirming leaves
+        :attr:`state.input_labels <aiolumagen.state.LumagenState.input_labels>`
+        showing what was *requested* rather than what the Lumagen kept.
+
+        :param input_number: Logical input 1-8.
+        :param label: Up to 10 renderable characters.
+        :param memory: ``"A"``-``"D"``, or ``"ALL"`` to write every bank.
+
+        With ``memory="ALL"`` the read-back reads bank ``A``, since that's the
+        bank :meth:`query_input_labels` tracks by default and all four were
+        just written to the same value.
+
+        :raises LumagenCommandError: for an invalid input, memory, or label —
+            raised by the command builder before anything is sent.
+        """
+        await self.send_command(
+            input_label_command(input_number, label, memory=memory),
+            cr=True,
+            refresh=False,
+        )
+        bank = memory.upper()
+        read_bank = "A" if bank in ("ALL", "0") else bank
+        await self._read_input_label(input_number, read_bank, self.LABEL_QUERY_TIMEOUT)
+
+    async def restart_input(self, input_number: int | str = "all") -> None:
+        """Pulse HDMI hotplug on an input via ``ZY520`` so the source renegotiates.
+
+        The documented fix for a source stuck at the wrong resolution, missing
+        an audio format, or showing nothing after a change further down the
+        chain — a cable reseat without the cable.
+
+        :param input_number: Logical input 1-8, or ``"all"``.
+
+        Expect a brief signal dropout on the affected input while the source
+        re-reads EDID; that's the mechanism working, not a fault.
+        """
+        await self.send_command(input_restart_command(input_number), cr=True, refresh=False)
+
+    async def show_aspect(self) -> None:
+        """``ZY811`` — pop the current input and aspect onto the OSD.
+
+        Reverse-engineered rather than documented in Tip0011. Fails soft: an
+        unrecognised ``ZY`` command is ignored, so on firmware without it
+        nothing appears and nothing breaks.
+        """
+        await self.send_command(show_aspect_command(), cr=True, refresh=False)
+
+    async def save_config(self) -> None:
+        """``ZY6SAVECONFIG`` — commit the running configuration to flash.
+
+        One shot, where :attr:`~aiolumagen.commands.Misc.SAVE` mirrors the
+        remote's SAVE key and needs a follow-up ``OK``. That makes this the
+        right choice for automation: a two-keystroke save whose confirmation
+        never arrives leaves a prompt on screen.
+
+        Tip0011 asks that any on-screen test pattern be exited first, so the
+        pattern isn't captured as configuration. Nothing here enforces that —
+        the library can't know a pattern is up, since the device doesn't report
+        one.
+        """
+        await self.send_command(save_config_command(), cr=True, refresh=False)
+
+    # ------------------------------------------------------------------
+    # On-screen display messages
+    # ------------------------------------------------------------------
+
+    async def show_message(
+        self,
+        text: str | None = None,
+        *,
+        line1: str | None = None,
+        line2: str | None = None,
+        duration: int = 3,
+        center: bool = False,
+    ) -> None:
+        """Print a message on the Lumagen's OSD via ``ZT``.
+
+        Two rows of 30 characters. Pass ``text`` to have it wrapped across
+        them, or ``line1``/``line2`` to place rows verbatim — see
+        :func:`~aiolumagen.commands.osd_message_command` for the field layout,
+        the character range, and how truncation is signalled.
+
+        :param text: Message to wrap.
+        :param line1: Explicit first row.
+        :param line2: Explicit second row.
+        :param duration: ``0``-``9``; ``9`` persists until
+            :meth:`clear_message`.
+        :param center: Centre each row.
+
+        Nothing is echoed back for this, and the device reports no OSD state,
+        so there's no way to confirm a message is on screen — treat it as
+        fire-and-forget.
+
+        :raises LumagenCommandError: on a bad duration, on passing both
+            ``text`` and explicit rows, or when the message is empty after
+            unrenderable characters are removed.
+        """
+        await self.send_command(
+            osd_message_command(
+                text=text,
+                line1=line1,
+                line2=line2,
+                duration=duration,
+                center=center,
+            ),
+            cr=True,
+            refresh=False,
+        )
+
+    async def clear_message(self) -> None:
+        """``ZC`` — clear any on-screen message.
+
+        Needed for a message sent with ``duration=9``, which otherwise stays up
+        indefinitely. Harmless when nothing is displayed.
+        """
+        await self.send_command(osd_clear_command(), refresh=False)
+
+    async def set_osd_block_char(self, char: str) -> None:
+        """``ZB`` — nominate a character to render as a solid block.
+
+        Repeat that character in a message to draw a bar (volume, progress).
+
+        Global and sticky: every later message renders the nominated character
+        as a block too, so pick one that won't appear in ordinary text. The
+        device reports no OSD configuration, so this can't be read back — a
+        consumer that cares must remember what it set.
+
+        :raises LumagenCommandError: unless ``char`` is one renderable
+            character.
+        """
+        await self.send_command(osd_block_char_command(char), refresh=False)
 
     async def set_sharpness(
         self,

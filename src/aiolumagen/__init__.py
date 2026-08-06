@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from aiolumagen.client import LumagenClient
-from aiolumagen.commands import Aspect, Input, Memory, Misc, Navigation, Power
+from aiolumagen.commands import (
+    INPUT_LABEL_MAX_LENGTH,
+    OSD_LINE_COUNT,
+    OSD_LINE_LENGTH,
+    OSD_PERSIST_DURATION,
+    Aspect,
+    Input,
+    Memory,
+    Misc,
+    Navigation,
+    Power,
+)
 from aiolumagen.exceptions import (
     LumagenCommandError,
     LumagenConnectionError,
@@ -29,6 +40,12 @@ from aiolumagen.state import (
 from aiolumagen.transport import LumagenTransport
 
 __all__ = [
+    # Device limits consumers need for their own input validation — exported so
+    # nobody has to hardcode 10/30/2 or reach into an internal module for them.
+    "INPUT_LABEL_MAX_LENGTH",
+    "OSD_LINE_COUNT",
+    "OSD_LINE_LENGTH",
+    "OSD_PERSIST_DURATION",
     "Aspect",
     "AutoAspectStatus",
     "Colorspace",
@@ -55,4 +72,4 @@ __all__ = [
     "derive_horizontal_resolution",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"

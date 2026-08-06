@@ -1005,3 +1005,150 @@ async def test_query_device_info_times_out_on_a_silent_device(
     with pytest.raises(TimeoutError):
         await c.query_device_info(timeout=0.05)
     await c.stop()
+
+
+# ---------- OSD messaging / labels / hotplug / config ----------
+
+
+async def test_show_message_writes_with_cr(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """ZT needs the CR terminator; ZB and ZC do not.
+
+    Getting that wrong is invisible in testing against a fake and obvious on
+    hardware (the message never appears), so it's pinned per command.
+    """
+    await client.start()
+    fake_transport.sent.clear()
+    await client.show_message("Volume 42")
+    assert fake_transport.sent == [b"ZT3Volume 42\r"]
+
+
+async def test_clear_message_and_block_char_send_without_cr(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    await client.start()
+    fake_transport.sent.clear()
+    await client.set_osd_block_char("#")
+    await client.clear_message()
+    assert fake_transport.sent == [b"ZB#", b"ZC"]
+
+
+async def test_show_message_explicit_rows_pad_row_one(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    await client.start()
+    fake_transport.sent.clear()
+    await client.show_message(line1="Input 3", line2="Apple TV", duration=9)
+    assert fake_transport.sent == [b"ZT9Input 3                       Apple TV\r"]
+
+
+async def test_show_message_validation_happens_before_any_write(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """A rejected message must not put a partial command on the wire."""
+    await client.start()
+    fake_transport.sent.clear()
+    with pytest.raises(LumagenCommandError):
+        await client.show_message("hello", duration=42)
+    with pytest.raises(LumagenCommandError):
+        await client.show_message("~~~")  # sanitises to nothing
+    assert fake_transport.sent == []
+
+
+async def test_show_message_does_not_trigger_a_status_refresh(
+    fake_transport: FakeTransport,
+) -> None:
+    """An OSD message changes no device state worth re-polling.
+
+    It is also not Z-prefixed... except it is, so the send_command guard
+    already covers it. Pinned anyway: if that guard ever keys off something
+    other than the Z prefix, a message must not start a poll storm.
+    """
+    c = LumagenClient(
+        fake_transport,
+        power_poll_interval=10.0,
+        status_poll_interval=10.0,
+        stale_timeout=30.0,
+    )
+    c.REFRESH_TICKS = (0.05,)
+    await c.start()
+    fake_transport.sent.clear()
+    await c.show_message("hi")
+    await asyncio.sleep(0.15)
+    await c.stop()
+    assert fake_transport.sent == [b"ZT3hi\r"]
+
+
+async def test_set_input_label_writes_then_reads_back(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """The read-back is the point: the device is the authority on what it kept.
+
+    Without it, state.input_labels would report what was requested rather than
+    what was stored, which diverges the moment the device rejects or trims a
+    label.
+    """
+    await client.start()
+    fake_transport.sent.clear()
+
+    original_write = fake_transport.write
+
+    async def _write_and_answer(data: bytes) -> None:
+        await original_write(data)
+        if data == b"ZQS1A1":
+            fake_transport.feed(b"!S1A,Roku 2A\r\n")
+
+    fake_transport.write = _write_and_answer  # type: ignore[method-assign]
+
+    await client.set_input_label(2, "Roku 2A")
+    assert fake_transport.sent == [b"ZY524A1Roku 2A\r", b"ZQS1A1"]
+    assert client.state.input_labels == {2: "Roku 2A"}
+
+
+async def test_set_input_label_all_memories_reads_back_bank_a(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """All four banks were written to the same value, so bank A confirms them."""
+    await client.start()
+    fake_transport.sent.clear()
+    await client.set_input_label(
+        1,
+        "Shield",
+        memory="ALL",
+    )
+    assert fake_transport.sent[0] == b"ZY52400Shield\r"
+    assert fake_transport.sent[1] == b"ZQS1A0"
+
+
+async def test_set_input_label_rejects_bad_input_before_writing(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    await client.start()
+    fake_transport.sent.clear()
+    with pytest.raises(LumagenCommandError, match="1-8"):
+        await client.set_input_label(9, "Nope")
+    with pytest.raises(LumagenCommandError, match="characters or fewer"):
+        await client.set_input_label(1, "x" * 11)
+    assert fake_transport.sent == []
+
+
+async def test_restart_input_writes_with_cr(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    await client.start()
+    fake_transport.sent.clear()
+    await client.restart_input(3)
+    await client.restart_input("all")
+    await client.restart_input()
+    assert fake_transport.sent == [b"ZY5202\r", b"ZY520A\r", b"ZY520A\r"]
+
+
+async def test_show_aspect_and_save_config_write_with_cr(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    await client.start()
+    fake_transport.sent.clear()
+    await client.show_aspect()
+    await client.save_config()
+    assert fake_transport.sent == [b"ZY811\r", b"ZY6SAVECONFIG\r"]
