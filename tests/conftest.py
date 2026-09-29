@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from aiolumagen.exceptions import LumagenConnectionError
 from aiolumagen.firmware.container import MAGIC, additive_checksum
 
 S01_RESPONSE = b"!S01,FakeModel,000000,0000,000000\r\n"
@@ -48,6 +49,11 @@ class FakeTransport:
         self.sent: list[bytes] = []
         self._connected = False
         self.connect_hook: Callable[[], Any] | None = None
+        self.connect_calls = 0
+        self.fail_connects = 0
+        """Make the next N :meth:`connect` calls raise, like an unreachable bridge."""
+        self.silent = False
+        """Stop auto-answering the handshake — a half-open or unpowered link."""
 
     @property
     def connected(self) -> bool:
@@ -57,6 +63,10 @@ class FakeTransport:
         self._on_data = callback
 
     async def connect(self) -> None:
+        self.connect_calls += 1
+        if self.fail_connects > 0:
+            self.fail_connects -= 1
+            raise LumagenConnectionError("simulated: bridge unreachable")
         self._connected = True
         if self.connect_hook is not None:
             result = self.connect_hook()
@@ -66,9 +76,16 @@ class FakeTransport:
     async def disconnect(self) -> None:
         self._connected = False
 
+    def drop(self) -> None:
+        """Simulate the peer closing the connection (``connection_lost``)."""
+        self._connected = False
+
     async def write(self, data: bytes) -> None:
+        if not self._connected:
+            # Mirrors LumagenTransport.write on a dropped connection.
+            raise LumagenConnectionError("Transport is not connected")
         self.sent.append(data)
-        if self._on_data is None:
+        if self._on_data is None or self.silent:
             return
         # Auto-respond to the two handshake queries the client waits on, so
         # startup completes immediately instead of burning its retry and

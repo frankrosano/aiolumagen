@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 
@@ -302,6 +303,141 @@ async def test_available_goes_false_on_true_silence(
     assert c.available is False
 
     await c.stop()
+
+
+# --- Link supervision / reconnect ------------------------------------------
+
+
+class _FastReconnectClient(LumagenClient):
+    """Same client with test-scale reconnect timings."""
+
+    RECONNECT_BACKOFF_INITIAL = 0.05
+    RECONNECT_BACKOFF_MAX = 0.2
+    RECONNECT_SETTLE = 0.0
+
+
+async def _wait_until(predicate: Callable[[], bool], timeout: float) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+async def test_reconnect_keeps_retrying_after_a_failed_attempt(
+    fake_transport: FakeTransport, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: one failed reconnect used to end recovery permanently.
+
+    The retry only ran on the available -> unavailable edge. When the first
+    attempt failed (the ESP bridge was still coming back), ``_available`` was
+    already False and no bytes could ever flip it back, so the client polled a
+    dead transport for 16 days until the integration was reloaded.
+    """
+    c = _FastReconnectClient(
+        fake_transport,
+        power_poll_interval=0.02,
+        status_poll_interval=None,
+        stale_timeout=0.5,
+    )
+    events: list[tuple[str, ...]] = []
+    c.subscribe(lambda _state, codes: events.append(codes))
+    await c.start()
+    assert c.available is True
+
+    fake_transport.fail_connects = 3
+    fake_transport.drop()
+    # Unavailable as soon as the transport is gone, not a stale window later.
+    assert c.available is False
+
+    await _wait_until(lambda: c.available, timeout=5.0)
+    await c.stop()
+
+    # start() + three refused attempts + the one that got through.
+    assert fake_transport.connect_calls == 5
+    # Listeners hear about the outage once, not once per failed attempt.
+    assert events.count(("_unavailable",)) == 1
+    # A dead transport isn't polled, so the log isn't flooded with failures.
+    assert "poll failed" not in caplog.text
+    # One warning for the outage, one for the first failed attempt; the rest
+    # of the retries are debug-level.
+    reconnect_warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "reconnect failed" in r.getMessage()
+    ]
+    assert len(reconnect_warnings) == 1
+
+
+async def test_reconnect_backoff_grows_and_caps(fake_transport: FakeTransport) -> None:
+    """Retries back off exponentially instead of hammering a dead bridge."""
+    c = _FastReconnectClient(
+        fake_transport,
+        power_poll_interval=0.01,
+        status_poll_interval=None,
+        stale_timeout=0.5,
+    )
+    await c.start()
+    fake_transport.fail_connects = 1_000
+    fake_transport.drop()
+    calls_before = fake_transport.connect_calls
+
+    await asyncio.sleep(1.0)
+    attempts = fake_transport.connect_calls - calls_before
+    assert c._reconnect_delay == c.RECONNECT_BACKOFF_MAX
+    # Unthrottled this would be ~100 attempts (one per 10 ms tick). With a
+    # 0.05 -> 0.1 -> 0.2 (capped) backoff it's the first immediate attempt
+    # plus roughly one per 0.2 s after that.
+    assert 3 <= attempts <= 10, attempts
+
+    # Once the bridge is back, the next attempt succeeds and the backoff resets.
+    fake_transport.fail_connects = 0
+    await _wait_until(lambda: c.available, timeout=2.0)
+    assert c._reconnect_delay == c.RECONNECT_BACKOFF_INITIAL
+    assert c._reconnect_failures == 0
+    await c.stop()
+
+
+async def test_reconnect_recovers_a_half_open_link(fake_transport: FakeTransport) -> None:
+    """An open transport that never answers is retried, not trusted forever.
+
+    Covers both the original half-open subscription (writes succeed, replies
+    never arrive) and the variant the old edge-trigger also missed: a
+    reconnect whose transport opens but whose handshake gets nothing back.
+    """
+    c = _FastReconnectClient(
+        fake_transport,
+        power_poll_interval=0.05,
+        status_poll_interval=None,
+        stale_timeout=0.3,
+    )
+    await c.start()
+    assert c.available is True
+
+    fake_transport.silent = True
+    await _wait_until(lambda: c._reconnect_failures >= 1, timeout=10.0)
+    assert c.available is False
+    assert fake_transport.connected  # the transport itself reopened fine
+
+    fake_transport.silent = False
+    await _wait_until(lambda: c.available, timeout=10.0)
+    await c.stop()
+
+
+async def test_link_supervision_does_not_reconnect_a_healthy_link(
+    fake_transport: FakeTransport,
+) -> None:
+    """Answered polls keep the link up; no reconnects without a reason."""
+    c = _FastReconnectClient(
+        fake_transport,
+        power_poll_interval=0.05,
+        status_poll_interval=None,
+        stale_timeout=0.3,
+    )
+    await c.start()
+    for _ in range(10):
+        fake_transport.feed(b"!S02,0\r\n")
+        await asyncio.sleep(0.05)
+    await c.stop()
+    assert fake_transport.connect_calls == 1
 
 
 async def test_init_rejects_stale_timeout_below_poll_interval(

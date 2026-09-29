@@ -131,6 +131,28 @@ class LumagenClient:
     RESPONSE_TIMEOUT = 5.0
     """Default deadline for :meth:`query_and_wait` / :meth:`wait_for_response`."""
 
+    RECONNECT_BACKOFF_INITIAL = 5.0
+    """Seconds before retrying after the first failed reconnect attempt.
+
+    The first attempt after an outage is detected is immediate; this is the
+    wait after it fails. Each further failure doubles it, up to
+    :attr:`RECONNECT_BACKOFF_MAX`. Attempts are only evaluated once per poll
+    tick, so the effective spacing is never shorter than the poll interval.
+    """
+
+    RECONNECT_BACKOFF_MAX = 300.0
+    """Ceiling on the reconnect backoff.
+
+    Deliberately finite: the failure this exists for is a bridge that reboots
+    or drops off the network and comes back on its own. A client that stops
+    retrying turns a transient outage into a permanent one — which is exactly
+    the bug this retry loop replaced, where one failed attempt ended recovery
+    for good. Five minutes bounds how long a recovered bridge sits unused.
+    """
+
+    RECONNECT_SETTLE = 1.0
+    """Pause between tearing the old transport down and opening a new one."""
+
     LABEL_QUERY_TIMEOUT = 2.0
     """Per-input deadline for :meth:`query_input_labels`.
 
@@ -175,7 +197,18 @@ class LumagenClient:
         self._refresh_task: asyncio.Task[None] | None = None
         self._started = False
         self._last_response_time: float | None = None
+        # When the current transport connection was opened. Silence is
+        # measured from the later of this and the last inbound bytes, so a
+        # link that connects and never answers still counts as stale — and a
+        # freshly (re)opened one isn't judged stale before it had a chance.
+        self._connected_at: float | None = None
         self._available = False
+        # Reconnect backoff. _next_reconnect_at is a loop-time deadline; 0.0
+        # means "no failure pending, attempt immediately". Reset whenever
+        # bytes arrive, i.e. whenever the link has proven itself again.
+        self._reconnect_delay = self.RECONNECT_BACKOFF_INITIAL
+        self._next_reconnect_at = 0.0
+        self._reconnect_failures = 0
         # Response-code -> futures awaiting that code. Populated by
         # _register_waiter and drained by _on_response; see the
         # "Request/response correlation" section below.
@@ -200,6 +233,7 @@ class LumagenClient:
         # Lumagen would look unresponsive even while polls succeed.
         self._transport.set_data_callback(self._on_bytes_received)
         await self._transport.connect()
+        self._connected_at = asyncio.get_running_loop().time()
         self._started = True
         await self._send_startup_sequence()
         if self._power_poll_interval is not None or self._status_poll_interval is not None:
@@ -247,6 +281,10 @@ class LumagenClient:
         if not self._available:
             return False
         if self._last_response_time is None:
+            return False
+        # A dropped transport can't deliver anything, so don't keep reporting
+        # "available" for the rest of the stale window after it goes.
+        if not self._transport.connected:
             return False
         elapsed = asyncio.get_event_loop().time() - self._last_response_time
         return elapsed < self._stale_timeout
@@ -1110,11 +1148,28 @@ class LumagenClient:
     async def _poll_loop(self) -> None:
         """Poll at the shorter of the two intervals; gate ZQI25 on power.
 
-        Also checks for staleness. If no response arrives within
-        ``stale_timeout`` we:
-          1. Mark the client as unavailable and notify listeners so the
-             coordinator flags entities unavailable in HA.
-          2. Force a full transport disconnect + reconnect cycle.
+        Also supervises the link. It is *down* when the transport has
+        dropped, or when it is open but nothing has arrived for
+        ``stale_timeout`` (measured from the later of the last inbound bytes
+        and when the connection was opened). While it is down we:
+          1. Once per outage, mark the client unavailable, notify listeners
+             so the coordinator flags entities unavailable in HA, and fail
+             any pending waiters.
+          2. Every tick, attempt a full transport disconnect + reconnect,
+             gated by an exponential backoff (see
+             :attr:`RECONNECT_BACKOFF_INITIAL` / :attr:`RECONNECT_BACKOFF_MAX`).
+             A reconnect counts as successful only when bytes come back.
+
+        Step 2 is level-triggered on purpose. It used to run only on the
+        available -> unavailable edge, so a single failed attempt — e.g. the
+        ESP bridge still rebooting when the retry fired — ended recovery for
+        good: ``_available`` was already False, nothing could deliver bytes
+        to set it back, and the client polled a dead transport indefinitely
+        until the integration was reloaded. Observed in the field as a
+        16-day outage.
+
+        Polls are skipped while the transport is down; they can only fail,
+        and logging that every tick buried the one line that mattered.
 
         The reconnect exists because a serial_proxy subscription can go
         half-open: writes still succeed and the ESP's UART keeps working,
@@ -1131,15 +1186,16 @@ class LumagenClient:
         re-confirmed since the switch back. The recovery is cheap and
         idempotent, so it stays.
         """
+        loop = asyncio.get_running_loop()
         p_iv = self._power_poll_interval
         s_iv = self._status_poll_interval
         base = min(v for v in (p_iv, s_iv) if v is not None)
-        p_due = asyncio.get_running_loop().time() + (p_iv or 0)
-        s_due = asyncio.get_running_loop().time() + (s_iv or 0)
-        try:
-            while True:
-                await asyncio.sleep(base)
-                now = asyncio.get_running_loop().time()
+        p_due = loop.time() + (p_iv or 0)
+        s_due = loop.time() + (s_iv or 0)
+        while True:
+            await asyncio.sleep(base)
+            now = loop.time()
+            if self._transport.connected:
                 try:
                     if p_iv is not None and now >= p_due:
                         await self.query_power()
@@ -1154,32 +1210,68 @@ class LumagenClient:
                 except LumagenConnectionError as err:
                     _LOGGER.warning("Lumagen poll failed: %s", err)
 
-                # Staleness check: if we were available but haven't heard
-                # back in stale_timeout seconds, mark unavailable, notify,
-                # and force a fresh subscription via transport reconnect.
-                if self._available and not self.available:
-                    self._available = False
-                    _LOGGER.warning(
-                        "Lumagen is now unavailable (no response in %.0fs), "
-                        "forcing transport reconnect",
-                        self._stale_timeout,
-                    )
-                    for listener in list(self._listeners):
-                        with suppress(Exception):
-                            listener(self._protocol.state, ("_unavailable",))
-                    # Anything still awaiting a reply is waiting on a
-                    # subscription we're about to throw away.
-                    self._fail_waiters("Transport reconnecting; response will not arrive")
-                    try:
-                        await self._transport.disconnect()
-                        await asyncio.sleep(1.0)
-                        await self._transport.connect()
-                        self._protocol.reset()
-                        await self._send_startup_sequence()
-                    except LumagenConnectionError as err:
-                        _LOGGER.warning("Reconnect failed: %s", err)
-        except asyncio.CancelledError:
-            raise
+            reason = self._link_down_reason(loop.time())
+            if reason is not None:
+                await self._handle_link_down(reason)
+
+    def _link_down_reason(self, now: float) -> str | None:
+        """Return why the link is down, or ``None`` if it looks healthy."""
+        if not self._transport.connected:
+            return "transport disconnected"
+        reference = max(
+            (t for t in (self._last_response_time, self._connected_at) if t is not None),
+            default=None,
+        )
+        if reference is not None and now - reference >= self._stale_timeout:
+            return f"no response in {self._stale_timeout:.0f}s"
+        return None
+
+    async def _handle_link_down(self, reason: str) -> None:
+        """Announce the outage once, then attempt a reconnect if backoff allows."""
+        if self._available:
+            self._available = False
+            _LOGGER.warning("Lumagen is now unavailable (%s), reconnecting", reason)
+            for listener in list(self._listeners):
+                with suppress(Exception):
+                    listener(self._protocol.state, ("_unavailable",))
+            # Anything still awaiting a reply is waiting on a subscription
+            # we're about to throw away.
+            self._fail_waiters("Transport reconnecting; response will not arrive")
+
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._next_reconnect_at:
+            return
+        try:
+            await self._transport.disconnect()
+            await asyncio.sleep(self.RECONNECT_SETTLE)
+            await self._transport.connect()
+        except LumagenConnectionError as err:
+            self._reconnect_failed(str(err))
+            return
+        self._connected_at = loop.time()
+        self._protocol.reset()
+        await self._send_startup_sequence()
+        # _on_bytes_received resets the backoff when the device answers; an
+        # open transport that stays silent is the half-open case and counts
+        # as a failure, or it would be retried every tick without backing off.
+        if not self._available:
+            self._reconnect_failed("transport reopened but the Lumagen did not respond")
+
+    def _reconnect_failed(self, detail: str) -> None:
+        """Schedule the next attempt and grow the backoff."""
+        delay = self._reconnect_delay
+        self._next_reconnect_at = asyncio.get_running_loop().time() + delay
+        self._reconnect_delay = min(delay * 2, self.RECONNECT_BACKOFF_MAX)
+        self._reconnect_failures += 1
+        # One warning per outage; the rest at debug so a long outage doesn't
+        # flood the log. Recovery is announced by _on_bytes_received.
+        log = _LOGGER.warning if self._reconnect_failures == 1 else _LOGGER.debug
+        log(
+            "Lumagen reconnect failed (attempt %d): %s; will keep retrying, next in %.0fs",
+            self._reconnect_failures,
+            detail,
+            delay,
+        )
 
     def _on_bytes_received(self, data: bytes) -> None:
         """Called for every inbound chunk — updates liveness + feeds parser.
@@ -1193,7 +1285,18 @@ class LumagenClient:
         self._last_response_time = asyncio.get_event_loop().time()
         if not self._available:
             self._available = True
-            _LOGGER.info("Lumagen is now available (first response received)")
+            if self._reconnect_failures:
+                _LOGGER.info(
+                    "Lumagen is now available again after %d failed reconnect attempt(s)",
+                    self._reconnect_failures,
+                )
+            else:
+                _LOGGER.info("Lumagen is now available (first response received)")
+        # The link has proven itself; the next outage starts from a clean
+        # backoff with an immediate first attempt.
+        self._reconnect_delay = self.RECONNECT_BACKOFF_INITIAL
+        self._next_reconnect_at = 0.0
+        self._reconnect_failures = 0
         self._protocol.feed_bytes(data)
 
     def _on_protocol_update(self, state: LumagenState, codes: tuple[str, ...]) -> None:
