@@ -31,6 +31,8 @@ Layering, mirroring the rule the normal-mode :mod:`aiolumagen.protocol` follows:
 * :mod:`~aiolumagen.firmware.extract` — vendor EXE parsing
 * :mod:`~aiolumagen.firmware.protocol` — commands, replies, flash map, timings
 * :mod:`~aiolumagen.firmware.plan` — which sections need writing
+* :mod:`~aiolumagen.firmware.releases` — the vendor's release index and zip
+  (pure; the caller does the HTTP)
 * :mod:`~aiolumagen.firmware.session` — the only module that does I/O
 
 Everything except ``session`` is pure and synchronous, so the whole command
@@ -41,8 +43,9 @@ Two operational constraints worth knowing before you call this:
 
 **One subscriber.** ESPHome's ``serial_proxy`` serves a single subscriber at a
 time. A :class:`~aiolumagen.client.LumagenClient` connected to the same bridge
-must be disconnected first, and in Home Assistant that means unloading the
-config entry.
+must be stopped first. A consumer that keeps a long-lived client (as Home
+Assistant's integration does) stops it for the duration of the update and starts
+it again afterwards.
 
 **A successful update powers the unit off.** That is the device's own behaviour
 and not a fault: the final ``Z97`` is what makes the newly promoted firmware
@@ -86,6 +89,15 @@ from aiolumagen.firmware.protocol import (
     DeviceIdentity,
     FirmwareRevision,
 )
+from aiolumagen.firmware.releases import (
+    RELEASES_URL,
+    LumagenReleaseIndexError,
+    ReleaseChannel,
+    ReleaseListing,
+    extract_updater_zip,
+    latest_release,
+    parse_release_index,
+)
 from aiolumagen.firmware.session import (
     AuditResult,
     FirmwareSession,
@@ -96,6 +108,7 @@ from aiolumagen.firmware.session import (
 )
 
 __all__ = [
+    "RELEASES_URL",
     "SUPPORTED_BAUDS",
     "WRITABLE_SECTIONS",
     "AuditResult",
@@ -107,8 +120,11 @@ __all__ = [
     "FirmwareImage",
     "FirmwareRevision",
     "FirmwareSession",
+    "LumagenReleaseIndexError",
     "PlannedSection",
     "ProgressCallback",
+    "ReleaseChannel",
+    "ReleaseListing",
     "SectionAction",
     "UpdatePhase",
     "UpdatePlan",
@@ -117,9 +133,12 @@ __all__ = [
     "additive_checksum",
     "expected_stored_checksum",
     "extract_images",
+    "extract_updater_zip",
     "find_containers",
+    "latest_release",
     "load_updater",
     "parse_container",
+    "parse_release_index",
     "plan_update",
     "update_firmware",
 ]

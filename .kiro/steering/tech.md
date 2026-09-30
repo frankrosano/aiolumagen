@@ -137,6 +137,7 @@ uv run python examples/via_url.py 'esphome://10.0.0.42:6053/?port_name=Lumagen&k
 | `LumagenFirmwareImageError` | Bad input file; no device was contacted. Also subclasses `ValueError` |
 | `LumagenFirmwareAbortError` | Update refused or stopped **before touching live firmware**. Tell the user nothing changed and offer a retry |
 | `LumagenFirmwareError` | Base of the two above; also what an unconfirmable outcome raises. Surface the message |
+| `LumagenReleaseIndexError` | The lumagen.com release index didn't parse; no device was contacted. `UpdateFailed` in the release coordinator — offer no update. Subclasses `LumagenFirmwareError` and `ValueError`; exported from `aiolumagen.firmware` only |
 
 There is no `LumagenAuthError` — the Lumagen has no auth. Transport-layer auth failures (e.g. wrong ESPHome PSK) surface as `LumagenConnectionError` via serialx.
 

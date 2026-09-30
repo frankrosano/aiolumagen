@@ -171,6 +171,53 @@ print(plan.describe())
 print(plan.estimated_seconds(230400) / 60, "minutes")
 ```
 
+### Finding releases
+
+`aiolumagen.firmware.releases` reads Lumagen's release index and unpacks the
+release zip. **The library never does HTTP**: you fetch
+`RELEASES_URL` and the zip with whatever client you already have, and hand the
+text and bytes over.
+
+```python
+from aiolumagen.firmware import (
+    RELEASES_URL,
+    ReleaseChannel,
+    extract_images,
+    extract_updater_zip,
+    latest_release,
+    parse_release_index,
+)
+
+listings = parse_release_index(html)  # oldest first
+newest = latest_release(listings, ReleaseChannel.BETA)
+# ... fetch newest.url (it redirects; follow it) ...
+name, exe = extract_updater_zip(zip_bytes)
+bundle = extract_images(exe, source_name=name)
+```
+
+- `parse_release_index(html)` returns `ReleaseListing`s, deduped and in
+  chronological order, each with `revision`, `channel`, `label`, `posted`, `url`,
+  `notes` and `est_minutes`. Each listing is keyed on the **download filename**;
+  the heading text is hand-typed on the page and has been wrong, so the label,
+  posted date and time estimate are advisory and may be empty.
+- `latest_release(listings, channel)`: `BETA` is the newest release of any label
+  (Lumagen ships nearly everything as beta); `PRODUCTION` is the newest labelled
+  exactly *Production*. "Production candidate", unknown and missing labels all
+  count as beta, so a pre-release is never offered on the production track.
+- **It fails closed.** No release links, a filename that isn't a plausible
+  `MMDDYY` revision, or a link that isn't `https` on the index's own host raises
+  `LumagenReleaseIndexError` for the whole page. Offer nothing rather than guess.
+- `extract_updater_zip(data)` returns `(exe_name, exe_bytes)` for the single
+  `radiance_pro*.exe` in the archive. It rejects absolute or `..` member paths,
+  more than one (or no) updater, encrypted members, and anything decompressing
+  past 32 MB, all as `LumagenFirmwareImageError`.
+- Feed the result to `extract_images(exe, source_name=name)`, **not**
+  `load_updater(exe)`: bare bytes lose the filename, and with it
+  `bundle.release`.
+
+`LumagenReleaseIndexError` subclasses `LumagenFirmwareError` and `ValueError`, and
+is exported from `aiolumagen.firmware` only — not the package root.
+
 ### What gets written
 
 | Image | Decision |
@@ -342,8 +389,8 @@ each, then a promotion, and section 1 last.
 ### Before you use it
 
 - **`serial_proxy` serves one subscriber at a time.** Disconnect any
-  `LumagenClient` on the same bridge first; in Home Assistant, unload the config
-  entry.
+  `LumagenClient` on the same bridge first. A long-lived client can simply be
+  stopped for the update and started again afterwards.
 - **Percent-encode the PSK.** ESPHome noise keys are base64 and routinely contain
   `+`, which a URL query string decodes as a *space* — corrupting the key while
   preserving its length, and surfacing as aioesphomeapi's misleading
@@ -397,9 +444,12 @@ and the only model the planner will accept.
 | `LumagenFirmwareImageError` | The user's file is unusable, and no device was contacted. Report it as a bad input. Also subclasses `ValueError` |
 | `LumagenFirmwareAbortError` | A safety gate refused, or the update stopped before committing. **Live firmware is unchanged** — say so, and offer a retry |
 | `LumagenFirmwareError` | Base class for the two above, and what an unconfirmable outcome raises. Surface the message rather than a generic failure |
+| `LumagenReleaseIndexError` | The release index didn't parse; no device was contacted. `UpdateFailed` in the release-check coordinator, and offer no update. Also subclasses `ValueError` |
 
-All three firmware exceptions are importable from the package root, so catching
-them doesn't require importing the firmware subsystem.
+The first three firmware exceptions are importable from the package root, so
+catching them doesn't require importing the firmware subsystem.
+`LumagenReleaseIndexError` is raised only by the release-index parser and lives in
+`aiolumagen.firmware`.
 
 `LumagenFirmwareAbortError` is the *good* failure and worth distinguishing in a
 UI: it guarantees live firmware is unchanged and a power cycle is the entire

@@ -22,6 +22,7 @@ aiolumagen/
 │           ├── extract.py      # vendor EXE parsing (PE walk + swdata code scan) — pure sync
 │           ├── protocol.py     # updater commands, replies, flash map, timings — pure sync
 │           ├── plan.py         # which sections need flashing — pure sync
+│           ├── releases.py     # lumagen.com release index + release-zip unpacking — pure sync, no HTTP
 │           └── session.py      # async orchestration; the only module here that does I/O
 ├── tests/                      # pytest suite (asyncio_mode=auto)
 └── examples/
@@ -37,7 +38,7 @@ LumagenClient        ← I/O orchestration, handshake, poll loop, subscriber dis
 └── LumagenTransport ← async byte plumbing over serialx
 
 FirmwareSession      ← firmware updating; own transport, own protocol
-└── firmware/*.py    ← pure-sync container / EXE / command / planning layers
+└── firmware/*.py    ← pure-sync container / EXE / command / planning / release-index layers
 ```
 
 **Strict separation:**
@@ -80,6 +81,8 @@ If you find yourself adding `await` to `protocol.py` or string parsing to `trans
 | Vendor EXE parsing, firmware container format | `firmware/extract.py`, `firmware/container.py` |
 | Updater-mode commands, flash map, transfer timings | `firmware/protocol.py` |
 | Which firmware sections need flashing | `firmware/plan.py` |
+| Parsing lumagen.com's release index, unpacking the release zip | `firmware/releases.py` |
+| Fetching the release index / zip over HTTP | the consumer (`ha-lumagen`) — never this library |
 | Erase/write/verify/promote orchestration | `firmware/session.py` |
 | Block-level audit and sector-granular repair | `firmware/session.py` |
 | Firmware-update **entity**, progress in the UI | `ha-lumagen` (downstream) |

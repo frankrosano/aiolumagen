@@ -22,6 +22,7 @@ Firmware updating is a second, independent protocol rather than an extension of 
 
 | Capability | Entry point |
 |---|---|
+| Find releases on lumagen.com / unpack the vendor zip (caller does the HTTP) | `parse_release_index()` + `latest_release()` / `extract_updater_zip()` |
 | Parse a vendor updater EXE into firmware images | `load_updater()` / `extract_images()` |
 | Decide which sections actually need writing | `plan_update()` → `UpdatePlan` |
 | Update a device end to end | `update_firmware()` |
