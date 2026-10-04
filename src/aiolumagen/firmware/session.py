@@ -31,7 +31,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Final
 
@@ -48,7 +48,14 @@ from aiolumagen.firmware.container import (
     expected_stored_checksum,
 )
 from aiolumagen.firmware.extract import SECTION0, SECTION1, FirmwareBundle
-from aiolumagen.firmware.plan import DeviceStatus, PlannedSection, UpdatePlan, plan_update
+from aiolumagen.firmware.plan import (
+    DeviceStatus,
+    PlannedSection,
+    ProgressStep,
+    UpdatePlan,
+    overall_fraction,
+    plan_update,
+)
 from aiolumagen.firmware.protocol import (
     ADDR_LIVE,
     AUDIT_CHUNK_BLOCKS,
@@ -267,9 +274,25 @@ class UpdateProgress:
     section: str | None = None
     bytes_done: int = 0
     bytes_total: int = 0
+    overall: float | None = None
+    """Progress through the whole :meth:`FirmwareSession.run_update`, 0.0 to 1.0.
+
+    The one to drive a progress bar with. It spans every section and phase, is
+    weighted by modelled time rather than bytes (see
+    :func:`~aiolumagen.firmware.plan.overall_fraction`), never decreases within a
+    run, and reaches 1.0 only on :attr:`UpdatePhase.DONE`. ``None`` outside
+    ``run_update`` — :meth:`~FirmwareSession.audit`, :meth:`~FirmwareSession.repair`
+    and the individual steps have no whole to measure against.
+    """
 
     @property
     def fraction(self) -> float | None:
+        """Progress through the current phase of the current section only.
+
+        Restarts from zero for each erase and each write, so an update writing
+        both sections runs it from 0 to 1 four times. Use :attr:`overall` for a
+        single bar.
+        """
         if self.bytes_total <= 0:
             return None
         return min(1.0, self.bytes_done / self.bytes_total)
@@ -390,6 +413,14 @@ class FirmwareSession:
         interrupt the user's viewing.
         """
         self._progress: ProgressCallback | None = None
+
+        # Whole-run progress, live only inside run_update. `_overall` is the
+        # high-water mark stamped onto every event; the plan, rate and section
+        # are what _advance needs to move it.
+        self._overall: float | None = None
+        self._overall_plan: UpdatePlan | None = None
+        self._overall_baud = 0
+        self._overall_section: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -512,8 +543,23 @@ class FirmwareSession:
         self._buffer += data
 
     def _emit(self, progress: UpdateProgress) -> None:
+        if self._overall is not None and progress.overall is None:
+            progress = replace(progress, overall=self._overall)
         if self._progress is not None:
             self._progress(progress)
+
+    def _advance(self, step: ProgressStep, done: int) -> None:
+        """Record that `done` units of `step` in the current section are complete.
+
+        A no-op outside run_update. Ratchets: the high-water mark is kept, so a
+        flush retry, the header-last reordering or a clamped pad byte can never
+        move the bar backwards.
+        """
+        plan, section = self._overall_plan, self._overall_section
+        if self._overall is None or plan is None or section is None:
+            return
+        value = overall_fraction(plan, self._overall_baud, section, step, done)
+        self._overall = max(self._overall, value)
 
     @staticmethod
     def _command_pace(nbytes: int) -> float:
@@ -843,6 +889,7 @@ class FirmwareSession:
             char = token.decode("ascii", "replace")
             if char == "x":
                 seen += 1
+                self._advance(ProgressStep.ERASE, seen)
                 self._emit(
                     UpdateProgress(
                         phase=UpdatePhase.ERASING,
@@ -868,6 +915,7 @@ class FirmwareSession:
 
         self.erased = True
         await asyncio.sleep(POST_ERASE_DELAY)
+        self._advance(ProgressStep.SETTLE, 1)
 
     async def _set_transport_baud(self, rate: int) -> None:
         await self._transport.set_baudrate(rate)
@@ -1587,6 +1635,7 @@ class FirmwareSession:
             committing = True
 
         def on_block(done: int, size: int) -> None:
+            self._advance(ProgressStep.WRITE, done)
             self._emit(
                 UpdateProgress(
                     phase=UpdatePhase.COMMITTING if committing else UpdatePhase.WRITING,
@@ -1647,63 +1696,78 @@ class FirmwareSession:
             )
 
         self._progress = progress
-        self._emit(UpdateProgress(phase=UpdatePhase.PREFLIGHT, message="checking device state"))
-        await self.preflight()
+        self._overall = 0.0
+        try:
+            self._emit(UpdateProgress(phase=UpdatePhase.PREFLIGHT, message="checking device state"))
+            await self.preflight()
 
-        self._emit(UpdateProgress(phase=UpdatePhase.PLANNING, message="reading current firmware"))
-        if plan is None:
-            # Still read the device even when forcing: the status is what tells the
-            # user (and the log) what was replaced, and read_status is read-only.
-            status = await self.read_status()
-            plan = plan_update(bundle, status, force=force, only=only)
-        _LOGGER.info("Firmware update plan:\n%s", plan.describe())
+            self._emit(
+                UpdateProgress(phase=UpdatePhase.PLANNING, message="reading current firmware")
+            )
+            if plan is None:
+                # Still read the device even when forcing: the status is what tells
+                # the user (and the log) what was replaced, and read_status is
+                # read-only.
+                status = await self.read_status()
+                plan = plan_update(bundle, status, force=force, only=only)
+            _LOGGER.info("Firmware update plan:\n%s", plan.describe())
 
-        if dry_run or plan.is_empty:
-            reason = "dry run" if dry_run else "already up to date"
-            self._emit(UpdateProgress(phase=UpdatePhase.DONE, message=reason))
+            if dry_run or plan.is_empty:
+                reason = "dry run" if dry_run else "already up to date"
+                self._emit(UpdateProgress(phase=UpdatePhase.DONE, message=reason, overall=1.0))
+                return UpdateResult(
+                    plan=plan,
+                    dry_run=dry_run,
+                    flush_mode=self.flush_mode,
+                    notes=(*self._stats.notes, f"nothing written ({reason})"),
+                )
+
+            if baudrate != self.baudrate:
+                self._emit(
+                    UpdateProgress(
+                        phase=UpdatePhase.RATE_CHANGE, message=f"negotiating {baudrate} baud"
+                    )
+                )
+                await self.set_baud(baudrate)
+                if not await self.rate_check():
+                    raise LumagenFirmwareAbortError(
+                        f"the link is losing bytes at {baudrate} baud — two reads of the "
+                        "same live-firmware address disagreed. Nothing has been erased. "
+                        "Retry at a lower rate."
+                    )
+
+            self._overall_plan, self._overall_baud = plan, baudrate
+            written: list[str] = []
+            for section in plan.write_order:
+                self._overall_section = section.name
+                if section.name == SECTION1:
+                    await self._write_section1(section)
+                elif section.name == SECTION0:
+                    await self._write_section0(section, promote=promote)
+                else:
+                    raise LumagenFirmwareImageError(
+                        f"no write path for section {section.name!r}. Chip images are "
+                        "deliberately out of scope."
+                    )
+                # Credited only once the section is entirely finished, so the last
+                # section's completion is the 1.0 that DONE then reports.
+                self._advance(ProgressStep.VERIFY, 1)
+                written.append(section.name)
+
+            self._emit(
+                UpdateProgress(phase=UpdatePhase.DONE, message="update complete", overall=1.0)
+            )
             return UpdateResult(
                 plan=plan,
-                dry_run=dry_run,
+                written=tuple(written),
+                promoted=self.promoted,
+                powered_down=self.requires_restart,
                 flush_mode=self.flush_mode,
-                notes=(*self._stats.notes, f"nothing written ({reason})"),
+                flush_calls=self._stats.flush_calls,
+                flush_retries=self._stats.flush_retries,
+                notes=tuple(self._stats.notes),
             )
-
-        if baudrate != self.baudrate:
-            self._emit(
-                UpdateProgress(
-                    phase=UpdatePhase.RATE_CHANGE, message=f"negotiating {baudrate} baud"
-                )
-            )
-            await self.set_baud(baudrate)
-            if not await self.rate_check():
-                raise LumagenFirmwareAbortError(
-                    f"the link is losing bytes at {baudrate} baud — two reads of the "
-                    "same live-firmware address disagreed. Nothing has been erased. "
-                    "Retry at a lower rate."
-                )
-
-        written: list[str] = []
-        ordered = sorted(plan.to_write, key=lambda s: s.name != SECTION1)
-        for section in ordered:
-            if section.name == SECTION1:
-                await self._write_section1(section)
-            elif section.name == SECTION0:
-                await self._write_section0(section, promote=promote)
-            else:
-                raise LumagenFirmwareImageError(
-                    f"no write path for section {section.name!r}. Chip images are "
-                    "deliberately out of scope."
-                )
-            written.append(section.name)
-
-        self._emit(UpdateProgress(phase=UpdatePhase.DONE, message="update complete"))
-        return UpdateResult(
-            plan=plan,
-            written=tuple(written),
-            promoted=self.promoted,
-            powered_down=self.requires_restart,
-            flush_mode=self.flush_mode,
-            flush_calls=self._stats.flush_calls,
-            flush_retries=self._stats.flush_retries,
-            notes=tuple(self._stats.notes),
-        )
+        finally:
+            self._overall = None
+            self._overall_plan = None
+            self._overall_section = None

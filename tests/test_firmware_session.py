@@ -683,6 +683,148 @@ class TestRunUpdate:
         assert fake_firmware.copies == []
 
 
+def _assert_one_monotonic_bar(seen: list[UpdateProgress]) -> list[float]:
+    """Every event carries `overall`, it never decreases, and only DONE reaches 1.0."""
+    overall = [p.overall for p in seen]
+    assert None not in overall, "every event inside run_update must carry overall"
+    values = [v for v in overall if v is not None]
+    assert values[0] == 0.0
+    assert values == sorted(values), f"overall went backwards: {values}"
+    assert seen[-1].phase is UpdatePhase.DONE
+    assert values[-1] == 1.0
+    assert all(v < 1.0 for v in values[:-1]), "1.0 must be reserved for DONE"
+    return values
+
+
+class TestOverallProgress:
+    """One bar across the whole update, unlike the per-phase `fraction`.
+
+    Observed on hardware: a both-sections update drove Home Assistant's bar from 0
+    to 100% four times, because `fraction` restarts for every erase and write.
+    """
+
+    async def test_two_section_run_is_one_monotonic_bar(
+        self, fake_firmware: FakeFirmwareTransport
+    ) -> None:
+        fake_firmware.commit(
+            SECTION1_SLOTS["99"].address, build_container(b"old firmware" * 700), 0xFADE0005
+        )
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+        result = await session.run_update(make_bundle(), progress=seen.append)
+        assert result.written == (SECTION1, SECTION0)
+
+        values = _assert_one_monotonic_bar(seen)
+        assert len(set(values)) > 6, "the bar should move through the run, not jump"
+        # Section 1 finishes well short of the end: section 0 is still to come.
+        last_s1 = max(i for i, p in enumerate(seen) if p.section == SECTION1)
+        first_s0 = min(i for i, p in enumerate(seen) if p.section == SECTION0)
+        assert 0.0 < values[last_s1] <= values[first_s0] < 1.0
+        # Erases and writes both move it, so it can't sit still through either.
+        for phase in (UpdatePhase.ERASING, UpdatePhase.WRITING):
+            during = [v for p, v in zip(seen, values, strict=True) if p.phase is phase]
+            assert during[-1] > during[0], f"{phase} did not advance the bar"
+
+    async def test_per_phase_fraction_is_unchanged(
+        self, fake_firmware: FakeFirmwareTransport
+    ) -> None:
+        """`fraction` still restarts per phase and section — only `overall` is new."""
+        fake_firmware.commit(
+            SECTION1_SLOTS["99"].address, build_container(b"old firmware" * 700), 0xFADE0005
+        )
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+        await session.run_update(make_bundle(), progress=seen.append)
+
+        for p in seen:
+            if p.bytes_total:
+                assert p.fraction == min(1.0, p.bytes_done / p.bytes_total)
+            else:
+                assert p.fraction is None
+        writes = [
+            p
+            for p in seen
+            if p.phase in (UpdatePhase.WRITING, UpdatePhase.COMMITTING) and p.bytes_done
+        ]
+        completions = [p.section for p in writes if p.fraction == 1.0]
+        assert completions == [SECTION1, SECTION0]
+        erases = [p.fraction for p in seen if p.phase is UpdatePhase.ERASING and p.bytes_total]
+        assert erases.count(1.0) == 2  # one full erase run per section
+
+    async def test_section0_only_run(self, fake_firmware: FakeFirmwareTransport) -> None:
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+        await session.run_update(make_bundle(), only=[SECTION0], progress=seen.append)
+
+        values = _assert_one_monotonic_bar(seen)
+        writing = [
+            v
+            for p, v in zip(seen, values, strict=True)
+            if p.phase is UpdatePhase.WRITING and p.bytes_done
+        ]
+        assert writing == sorted(set(writing)), "each block should advance the bar"
+
+    async def test_flush_retries_never_move_it_backwards(self) -> None:
+        """The retry loop re-issues a barrier for the same block; progress must hold."""
+        transport = FakeFirmwareTransport(flush_statuses=["TIMEOUT", "OK"] * 3 + ["TIMEOUT"] * 3)
+        transport.commit(
+            SECTION1_SLOTS["99"].address, build_container(b"old firmware" * 700), 0xFADE0005
+        )
+        seen: list[UpdateProgress] = []
+        session = await opened(transport, flush_retry_delay=0.0)
+        result = await session.run_update(make_bundle(), progress=seen.append)
+
+        assert result.flush_retries > 0, "the retry path was not exercised"
+        _assert_one_monotonic_bar(seen)
+
+    async def test_dry_run_reports_done_as_complete(
+        self, fake_firmware: FakeFirmwareTransport
+    ) -> None:
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+        await session.run_update(make_bundle(), dry_run=True, progress=seen.append)
+        assert [p.overall for p in seen] == [0.0, 0.0, 1.0]
+
+    async def test_is_none_outside_run_update(self, fake_firmware: FakeFirmwareTransport) -> None:
+        """Audit, repair and the individual steps have no whole to measure against."""
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+        await session.run_update(
+            make_bundle(), only=[SECTION0], promote=False, progress=seen.append
+        )
+        during = len(seen)
+
+        await session.erase_run(SCRATCH_SECTOR, 1)
+        await session.audit(b"\x00" * BLOCK_SIZE, SCRATCH_ADDR)
+        after = seen[during:]
+        assert {p.phase for p in after} >= {UpdatePhase.ERASING, UpdatePhase.AUDITING}
+        assert all(p.overall is None for p in after)
+
+    async def test_is_none_after_a_failed_run(
+        self, fake_firmware: FakeFirmwareTransport, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[UpdateProgress] = []
+        session = await opened(fake_firmware)
+
+        async def _bad_rate_check(*_a: object, **_k: object) -> bool:
+            return False
+
+        monkeypatch.setattr(session, "rate_check", _bad_rate_check)
+        with pytest.raises(LumagenFirmwareAbortError):
+            await session.run_update(make_bundle(), progress=seen.append)
+        assert all(p.overall == 0.0 for p in seen)
+
+        during = len(seen)
+        await session.erase_run(SCRATCH_SECTOR, 1)
+        assert all(p.overall is None for p in seen[during:])
+
+    def test_defaults_to_none(self) -> None:
+        """Additive: existing constructors keep working and report no overall."""
+        progress = UpdateProgress(phase=UpdatePhase.WRITING, message="m", bytes_done=1)
+        assert progress.overall is None
+        assert progress.fraction is None
+
+
 class TestHandBack:
     async def test_context_manager_restores_the_rate_and_leaves(self) -> None:
         """A device stranded in updater mode at 230400 answers nobody at 9600."""

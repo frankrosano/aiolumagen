@@ -160,6 +160,13 @@ result = await update_firmware(
 print(result.written)  # ('section1', 'section0')
 ```
 
+For a progress bar, use `p.overall`: 0.0 to 1.0 across the whole update, never
+decreasing, and 1.0 only at `UpdatePhase.DONE`. It is weighted by the same
+timing model as `estimated_seconds()`, so erases and writes advance it at their
+real relative cost. `p.fraction` is per phase and per section, so it restarts
+for every erase and every write (four times when both sections are written).
+`overall` is `None` outside `run_update`, e.g. during `audit()` or `repair()`.
+
 It extracts the firmware images from the EXE, asks the device what it currently
 holds, works out which sections actually differ, and writes only those. Pass
 `dry_run=True` first to get the plan without changing anything — worth doing,

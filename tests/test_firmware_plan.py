@@ -19,11 +19,22 @@ from aiolumagen.firmware.extract import (
     extract_images,
 )
 from aiolumagen.firmware.plan import (
+    ERASE_SECTOR_SECONDS,
     DeviceStatus,
+    ProgressStep,
     SectionAction,
+    UpdatePlan,
+    overall_fraction,
     plan_update,
 )
-from aiolumagen.firmware.protocol import BOOT_SECTOR_LEN, FirmwareRevision, parse_identity
+from aiolumagen.firmware.protocol import (
+    BLOCK_SIZE,
+    BOOT_SECTOR_LEN,
+    CHECKPOINT_SETTLE,
+    POST_ERASE_DELAY,
+    FirmwareRevision,
+    parse_identity,
+)
 from tests.conftest import build_container, build_updater_exe
 
 SECTION1_PAYLOAD = b"section-one-payload" * 512
@@ -255,3 +266,70 @@ class TestPlanReporting:
         assert "WRITE section0" in text
         assert "skip  section1" in text
         assert "2026-03-03" in text
+
+
+def _walk(plan: UpdatePlan, baud: int) -> list[float]:
+    """overall_fraction at every unit of every step, in session order."""
+    out: list[float] = []
+    for section in plan.write_order:
+        points: dict[ProgressStep, list[int]] = {
+            ProgressStep.ERASE: list(range(section.sectors + 1)),
+            ProgressStep.SETTLE: [0, 1],
+            ProgressStep.WRITE: [*range(0, section.wire_size, BLOCK_SIZE), section.wire_size],
+            ProgressStep.VERIFY: [0, 1],
+        }
+        for step in ProgressStep:
+            out.extend(overall_fraction(plan, baud, section.name, step, d) for d in points[step])
+    return out
+
+
+class TestOverallFraction:
+    def test_write_order_puts_section1_first(self) -> None:
+        plan = plan_update(make_bundle(), DeviceStatus())
+        assert [s.name for s in plan.write_order] == [SECTION1, SECTION0]
+
+    def test_step_costs_match_the_estimate(self) -> None:
+        """The bar's weights are the estimate's, plus one settle per section."""
+        plan = plan_update(make_bundle(), DeviceStatus())
+        modelled = (ProgressStep.ERASE, ProgressStep.SETTLE, ProgressStep.WRITE)
+        for baud in (9600, 230400):
+            summed = sum(s.step_seconds(st, baud) for s in plan.write_order for st in modelled)
+            assert summed == pytest.approx(plan.estimated_seconds(baud))
+        verify = sum(s.step_seconds(ProgressStep.VERIFY, 230400) for s in plan.write_order)
+        assert verify == pytest.approx(CHECKPOINT_SETTLE * len(plan.write_order))
+
+    @pytest.mark.parametrize("only", [None, [SECTION0], [SECTION1]])
+    def test_runs_monotonically_from_zero_to_one(self, only: list[str] | None) -> None:
+        plan = plan_update(make_bundle(), DeviceStatus(), only=only)
+        values = _walk(plan, 230400)
+        assert values[0] == 0.0
+        assert values == sorted(values)
+        assert values[-1] == 1.0
+        assert values.count(1.0) == 1, "only the final step of the final section is 1.0"
+
+    def test_weights_by_time_not_bytes(self) -> None:
+        """An erase is cheap per byte; a byte-weighted bar would stall through it."""
+        plan = plan_update(make_bundle(), DeviceStatus(), only=[SECTION0])
+        (section,) = plan.write_order
+        erased = overall_fraction(plan, 230400, SECTION0, ProgressStep.ERASE, section.sectors)
+        settled = overall_fraction(plan, 230400, SECTION0, ProgressStep.SETTLE, 1)
+        total = plan.estimated_seconds(230400) + CHECKPOINT_SETTLE
+        assert erased == pytest.approx(section.sectors * ERASE_SECTOR_SECONDS / total)
+        assert settled == pytest.approx(erased + POST_ERASE_DELAY / total)
+
+    def test_clamps_the_pad_byte(self) -> None:
+        """The session may append one byte to reach an even end address."""
+        plan = plan_update(make_bundle(), DeviceStatus(), only=[SECTION0])
+        (section,) = plan.write_order
+        exact = overall_fraction(plan, 230400, SECTION0, ProgressStep.WRITE, section.wire_size)
+        padded = overall_fraction(plan, 230400, SECTION0, ProgressStep.WRITE, section.wire_size + 1)
+        assert padded == exact < 1.0
+
+    def test_rejects_a_section_the_plan_does_not_write(self) -> None:
+        plan = plan_update(make_bundle(), DeviceStatus(), only=[SECTION0])
+        with pytest.raises(ValueError, match="not written"):
+            overall_fraction(plan, 230400, SECTION1, ProgressStep.WRITE, 0)
+
+    def test_safe_at_zero_baud(self) -> None:
+        plan = plan_update(make_bundle(), DeviceStatus())
+        assert _walk(plan, 0)[-1] == 1.0

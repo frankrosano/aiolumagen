@@ -44,6 +44,7 @@ from aiolumagen.firmware.extract import (
 )
 from aiolumagen.firmware.protocol import (
     BLOCK_DELAY,
+    CHECKPOINT_SETTLE,
     POST_ERASE_DELAY,
     DeviceIdentity,
     FirmwareRevision,
@@ -53,6 +54,9 @@ from aiolumagen.firmware.protocol import (
 
 BITS_PER_BYTE: Final = 10
 """8N1: one start bit and one stop bit, so ten bit-times per byte."""
+
+ERASE_SECTOR_SECONDS: Final = 0.34
+"""Roughly how long the device takes to erase one sector (it streams one ``x`` each)."""
 
 WRITABLE_SECTIONS: Final = (SECTION0, SECTION1)
 """Sections this library has a qualified write path for.
@@ -69,6 +73,29 @@ class SectionAction(StrEnum):
 
     WRITE = "write"
     SKIP = "skip"
+
+
+class ProgressStep(StrEnum):
+    """One stage of writing a section, in the order the session performs them.
+
+    The unit of `done` passed to :func:`overall_fraction` depends on the step:
+    sectors erased for ``ERASE``, bytes handed to the transport for ``WRITE``,
+    and 0 or 1 (not yet / complete) for ``SETTLE`` and ``VERIFY``.
+    """
+
+    ERASE = "erase"
+    SETTLE = "settle"
+    """The post-erase settle, :data:`~aiolumagen.firmware.protocol.POST_ERASE_DELAY`."""
+
+    WRITE = "write"
+    VERIFY = "verify"
+    """Everything after the last block until the section is finished.
+
+    Weighted as one :data:`~aiolumagen.firmware.protocol.CHECKPOINT_SETTLE` — the
+    one fixed wait the session always performs before verifying. The checksum
+    reads and section 0's internal copy are not modelled (see
+    :meth:`UpdatePlan.estimated_seconds`), so this is a floor, not an estimate.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +160,28 @@ class PlannedSection:
     def will_write(self) -> bool:
         return self.action is SectionAction.WRITE
 
+    def step_seconds(self, step: ProgressStep, baudrate: int, done: int | None = None) -> float:
+        """Modelled seconds for `done` units of `step`, or all of it when omitted.
+
+        Uses the same per-unit costs as :meth:`UpdatePlan.estimated_seconds`, so
+        the ``ERASE``, ``SETTLE`` and ``WRITE`` steps of every written section sum
+        to that estimate at any positive rate. `done` is clamped to the step's
+        size, which absorbs the one pad byte the session may append to reach an
+        even end address.
+        """
+        match step:
+            case ProgressStep.ERASE:
+                sectors = self.sectors if done is None else max(0, min(done, self.sectors))
+                return sectors * ERASE_SECTOR_SECONDS
+            case ProgressStep.SETTLE:
+                return POST_ERASE_DELAY if done is None or done > 0 else 0.0
+            case ProgressStep.WRITE:
+                size = self.wire_size if done is None else max(0, min(done, self.wire_size))
+                wire = size * BITS_PER_BYTE / baudrate if baudrate > 0 else 0.0
+                return wire + blocks_for(size) * BLOCK_DELAY
+            case ProgressStep.VERIFY:
+                return CHECKPOINT_SETTLE if done is None or done > 0 else 0.0
+
 
 @dataclass(frozen=True, slots=True)
 class UpdatePlan:
@@ -168,6 +217,15 @@ class UpdatePlan:
         return not self.to_write
 
     @property
+    def write_order(self) -> tuple[PlannedSection, ...]:
+        """:attr:`to_write` in the order a session writes it: section 1 first.
+
+        Matches the vendor. Section 0 finishes with the promotion, and the
+        power-down that loads new firmware follows it, so it has to go last.
+        """
+        return tuple(sorted(self.to_write, key=lambda s: s.name != SECTION1))
+
+    @property
     def total_bytes(self) -> int:
         return sum(s.wire_size for s in self.to_write)
 
@@ -186,7 +244,9 @@ class UpdatePlan:
 
         Deliberately approximate — it excludes verification reads and the device's
         internal copy. Its job is to distinguish "about a minute" from "about ten"
-        so a user can decide whether now is a good time, not to run a progress bar.
+        so a user can decide whether now is a good time, not to predict a finish
+        time. :func:`overall_fraction` reuses the same per-unit costs, which only
+        needs them to be right *relative to each other*.
         """
         if baudrate <= 0:
             return 0.0
@@ -194,7 +254,7 @@ class UpdatePlan:
         for section in self.to_write:
             total += section.wire_size * BITS_PER_BYTE / baudrate
             total += section.blocks * BLOCK_DELAY
-            total += POST_ERASE_DELAY + section.sectors * 0.34
+            total += POST_ERASE_DELAY + section.sectors * ERASE_SECTOR_SECONDS
         return total
 
     def describe(self) -> str:
@@ -215,6 +275,44 @@ class UpdatePlan:
             lines.append(f"  {verb} {section.name:<9} {size:>16}  ({section.reason})")
         lines.extend(f"  ! {warning}" for warning in self.warnings)
         return "\n".join(lines)
+
+
+def overall_fraction(
+    plan: UpdatePlan, baudrate: int, section: str, step: ProgressStep, done: int
+) -> float:
+    """How much of a whole update is complete, from 0.0 to 1.0.
+
+    Given that every section before `section` in :attr:`UpdatePlan.write_order`
+    is finished, every step of `section` before `step` is finished, and `done`
+    units of `step` are (see :class:`ProgressStep` for the units).
+
+    Weighted by modelled time rather than bytes, because the steps cost very
+    different amounts: a 128 KiB sector erases in about a third of a second,
+    while writing the same 128 KiB takes about ten seconds at 230400. A byte-weighted
+    bar would stall through every erase and settle, then race through the writes.
+
+    Fixed phases that :meth:`UpdatePlan.estimated_seconds` doesn't model —
+    preflight, planning, the rate change — carry no weight; the bar sits at 0.0
+    through them. 1.0 means every step of every section is done, so only a
+    finished update reaches it.
+
+    :raises ValueError: if `section` is not one the plan writes.
+    """
+    # One running sum for both numerator and denominator, deliberately not sum():
+    # its compensated float summation rounds differently, which left a finished
+    # update at 0.9999999999999998.
+    elapsed: float | None = None
+    total = 0.0
+    for planned in plan.write_order:
+        for st in ProgressStep:
+            if planned.name == section and st is step:
+                elapsed = total + planned.step_seconds(st, baudrate, done)
+            total += planned.step_seconds(st, baudrate)
+    if elapsed is None:
+        raise ValueError(f"{section!r} is not written by this plan")
+    if total <= 0:
+        return 0.0
+    return min(1.0, elapsed / total)
 
 
 def _plan_section0(bundle: FirmwareBundle) -> PlannedSection:
