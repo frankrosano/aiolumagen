@@ -174,15 +174,21 @@ escalation order. The rules the research campaign settled on, which still apply:
   escalation that matters, and it is what the qualification campaign actually did
   — the rate walk was deliberately skipped as the weaker test.
 - **Only 230400 is qualified.** It is the vendor's own rate and the one the flush
-  barrier was designed for, and it held with zero retries across ~1,900 blocks.
+  barrier was designed for, and it held with zero retries across ~1,900 blocks
+  from the CLI harness. From HA (`esphome-hass://`) it then saw one retry in
+  ~1,225 flush calls (3 × 113 scratch runs + one 886-call upgrade), which
+  recovered and verified.
   9600 / 57600 / 115200 are accepted by `SUPPORTED_BAUDS` but untested here.
   Historical note if you ever need a lower rate: 115200 is the worst of the three
   — it was once called qualified off a single clean run and later failed ~1 in 4.
-- **`flush_timeout: 1s` on the bridge is why the retry path never fires.** A
+- **`flush_timeout: 1s` on the bridge is why the retry path almost never fires.** A
   4096-byte block at 230400 is 177.8 ms of wire time, which drains inside that
   budget, so the ESP answers `OK` rather than `TIMEOUT`. On a bridge left at the
   100 ms default the retry loop becomes the *normal* path on every block. So a
   zero-retry result is evidence about the firmware config, not just the link.
+  "Almost": it fired once on hardware (one block of the 886-call HA upgrade) and
+  recovered. An occasional retry is the barrier working; one on every block
+  means the bridge config is wrong.
 - **Verify by a second, independent mechanism.** A whole-region `CS=` is one
   32-bit sum over megabytes; `--audit` checks each block separately and says
   *where* the damage is. Both agreeing is meaningfully stronger than either alone.

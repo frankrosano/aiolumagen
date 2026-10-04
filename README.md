@@ -424,13 +424,19 @@ and the only model the planner will accept.
 - Block-level audit of 113- and 772-block regions, including a committed slot
   with tag correction
 - The flush barrier: `flush mode: status`, **zero retries across ~1,900 blocks**
+  from the CLI harness
+- From Home Assistant, via `ha-lumagen`'s `esphome-hass://` URL (HA's shared
+  ESPHome connection): three scratch-only section-0 runs (0 retries each) and
+  one real upgrade `112325` → `030326` that rewrote section 1 and promoted
+  section 0, taking ~7.5 minutes
+- The flush-barrier **retry** path, once: one retry in that upgrade's 886 flush
+  calls, which recovered and verified. With `flush_timeout: 1s` on the bridge a
+  4096-byte block at 230400 normally drains inside the ESP's budget, so this is
+  rare; on a bridge left at the 100 ms default it is the normal path
 
 **Not exercised on hardware** (unit-tested only):
 
 - `repair()` — no run ever produced damage to repair
-- The flush-barrier **retry** path. With `flush_timeout: 1s` on the bridge, a
-  4096-byte block at 230400 drains inside the ESP's budget, so `TIMEOUT` never
-  occurs. It *is* the normal path on a bridge left at the 100 ms default
 - Rates other than 230400
 - Bootloader mode (deliberately refused) and chip-image writes (out of scope)
 - Any Radiance model other than the Pro, and any Pro other than a 4242
