@@ -440,6 +440,155 @@ async def test_link_supervision_does_not_reconnect_a_healthy_link(
     assert fake_transport.connect_calls == 1
 
 
+# --- Recovery re-query -----------------------------------------------------
+
+
+class _SlowRetryClient(_FastReconnectClient):
+    """Fast first reconnect, then a long backoff.
+
+    Leaves a window after one failed reconnect in which the device can come
+    back on the still-open transport without another reconnect (and its own
+    handshake) racing it — the window the field bug lived in.
+    """
+
+    RECONNECT_BACKOFF_INITIAL = 60.0
+    RECONNECT_BACKOFF_MAX = 60.0
+
+
+def _sent_count(transport: FakeTransport, command: bytes) -> int:
+    return sum(1 for chunk in transport.sent if chunk == command)
+
+
+async def test_recovery_without_handshake_requeries_device_info(
+    fake_transport: FakeTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: device info went stale across an outage with a firmware change.
+
+    Observed on hardware: USB unplugged from the bridge, the reconnect's
+    handshake timed out, the transport it opened stayed open, the user
+    downgraded the firmware and replugged, and the next poll reply restored
+    availability *without* a handshake. ZQS01 was never re-sent, so
+    ``state.firmware`` kept the pre-downgrade revision until a reload.
+    """
+    import tests.conftest as conftest
+
+    c = _SlowRetryClient(
+        fake_transport,
+        power_poll_interval=0.02,
+        status_poll_interval=None,
+        stale_timeout=1.5,
+    )
+    await c.start()
+    assert c.state.firmware == "000000"
+
+    # Device unplugged: nothing answers, the reconnect handshake times out.
+    fake_transport.silent = True
+    await _wait_until(lambda: c._reconnect_failures >= 1, timeout=15.0)
+    assert c.available is False
+    assert fake_transport.connected
+
+    # Replugged with different firmware; a routine poll reply arrives first.
+    monkeypatch.setattr(conftest, "S01_RESPONSE", b"!S01,FakeModel,030225,0000,000000\r\n")
+    fake_transport.silent = False
+    fake_transport.sent.clear()
+    fake_transport.feed(b"!S02,1\r\n")
+    assert c.available is True
+
+    await _wait_until(lambda: c.state.firmware == "030225", timeout=2.0)
+    await c.stop()
+    assert b"ZQS01" in fake_transport.sent
+    # A routine recovery, not a reconnect: the transport wasn't reopened.
+    assert fake_transport.connect_calls == 2
+
+
+async def test_reconnect_with_successful_handshake_does_not_requery_twice(
+    fake_transport: FakeTransport,
+) -> None:
+    """When the reconnect's own handshake restored the link, it already re-queried."""
+    c = _FastReconnectClient(
+        fake_transport,
+        power_poll_interval=0.02,
+        status_poll_interval=None,
+        stale_timeout=1.5,
+    )
+    await c.start()
+    fake_transport.drop()
+    fake_transport.sent.clear()
+
+    await _wait_until(lambda: c.available, timeout=5.0)
+    # Long enough for a spurious recovery refresh to have sent ZE2 + ZQS01.
+    await asyncio.sleep(0.6)
+    assert c._recovery_task is None
+    await c.stop()
+
+    assert _sent_count(fake_transport, b"ZQS01") == 1
+    assert _sent_count(fake_transport, b"ZE2") == 1
+
+
+async def test_stop_cancels_an_in_flight_recovery_refresh(
+    fake_transport: FakeTransport, client: LumagenClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """stop() mid-refresh unwinds the task quietly instead of leaking it."""
+    await client.start()
+    # As after an announced outage: unavailable, transport still open.
+    client._available = False
+    fake_transport.silent = True  # the refresh's ZQS01 will hang on its deadline
+
+    fake_transport.feed(b"!S02,1\r\n")
+    task = client._recovery_task
+    assert task is not None
+    await asyncio.sleep(0.5)  # past ZE2, inside the ZQS01 wait
+    assert not task.done()
+
+    await client.stop()
+    assert task.cancelled()
+    assert client._recovery_task is None
+    assert client._handshake_active is False
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "CRITICAL")]
+
+
+async def test_recovery_refresh_does_not_reenter(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """A second recovery edge while a refresh is running doesn't start another."""
+    await client.start()
+    client._available = False
+    fake_transport.silent = True
+    fake_transport.feed(b"!S02,1\r\n")
+    first = client._recovery_task
+    assert first is not None
+
+    client._available = False
+    fake_transport.feed(b"!S02,1\r\n")
+    assert client._recovery_task is first
+
+
+async def test_handshake_that_fails_after_a_recovery_edge_still_requeries(
+    fake_transport: FakeTransport, client: LumagenClient
+) -> None:
+    """An edge absorbed by a handshake that then fails is still owed a refresh.
+
+    A device can push an unsolicited line during the handshake and still miss
+    ZQS01. The handshake marked the client available, so without this nothing
+    would ever fetch device info.
+    """
+    await client.start()
+    client._available = False
+    fake_transport.silent = True
+
+    handshake = asyncio.create_task(client._run_handshake())
+    await asyncio.sleep(0.1)
+    fake_transport.feed(b"!S02,1\r\n")  # edge during the handshake
+    assert client._recovery_task is None
+
+    assert await handshake is False
+    assert client._recovery_task is not None
+    fake_transport.silent = False
+    fake_transport.sent.clear()
+    await client._recovery_task
+    assert b"ZQS01" in fake_transport.sent
+
+
 async def test_init_rejects_stale_timeout_below_poll_interval(
     fake_transport: FakeTransport,
 ) -> None:

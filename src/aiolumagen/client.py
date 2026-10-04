@@ -195,6 +195,14 @@ class LumagenClient:
         self._listeners: list[StateListener] = []
         self._poll_task: asyncio.Task[None] | None = None
         self._refresh_task: asyncio.Task[None] | None = None
+        # Recovery re-query: see _on_recovered. _handshake_active is True while
+        # a startup sequence is running, so a recovery edge it causes isn't
+        # answered with a second, redundant one; _recovery_pending records an
+        # edge seen during a handshake so it can be honoured if that handshake
+        # then fails.
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._handshake_active = False
+        self._recovery_pending = False
         self._started = False
         self._last_response_time: float | None = None
         # When the current transport connection was opened. Silence is
@@ -235,12 +243,15 @@ class LumagenClient:
         await self._transport.connect()
         self._connected_at = asyncio.get_running_loop().time()
         self._started = True
-        await self._send_startup_sequence()
+        await self._run_handshake()
         if self._power_poll_interval is not None or self._status_poll_interval is not None:
             self._poll_task = asyncio.create_task(self._poll_loop(), name="aiolumagen-poll")
 
     async def stop(self) -> None:
         """Cancel polling and disconnect the transport. Idempotent."""
+        # Cleared first so a byte arriving mid-stop can't flip availability
+        # and spawn a recovery refresh after _cancel_recovery() has run.
+        self._started = False
         if self._poll_task is not None:
             self._poll_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -251,9 +262,9 @@ class LumagenClient:
             with suppress(asyncio.CancelledError):
                 await self._refresh_task
             self._refresh_task = None
+        await self._cancel_recovery()
         self._fail_waiters("Client stopped while awaiting a response")
         await self._transport.disconnect()
-        self._started = False
 
     @property
     def state(self) -> LumagenState:
@@ -1013,8 +1024,81 @@ class LumagenClient:
     # Internals
     # ------------------------------------------------------------------
 
-    async def _send_startup_sequence(self) -> None:
+    async def _run_handshake(self) -> bool:
+        """Run :meth:`_send_startup_sequence` with recovery bookkeeping.
+
+        Every handshake goes through here — at :meth:`start`, after a
+        reconnect, and as the recovery re-query itself — so that a recovery
+        edge *caused* by the handshake's own replies is recognised as already
+        handled. If the handshake fails even though bytes arrived during it
+        (an unsolicited push from a device that then ignored ``ZQS01``), the
+        edge it absorbed is still owed a re-query, so one is scheduled.
+        """
+        self._handshake_active = True
+        self._recovery_pending = False
+        try:
+            succeeded = await self._send_startup_sequence()
+        finally:
+            self._handshake_active = False
+        pending = self._recovery_pending
+        self._recovery_pending = False
+        if not succeeded and pending and self._available:
+            self._schedule_recovery_refresh()
+        return succeeded
+
+    def _on_recovered(self) -> None:
+        """Handle the unavailable -> available edge.
+
+        Availability can come back without a handshake: a reconnect's own
+        handshake times out against an absent device, the transport it opened
+        stays open, and the device's next answer to a routine poll is what
+        restores the link. Device info (``!S01``) is never pushed, so without
+        a re-query a firmware change made while the link was down — e.g. a
+        downgrade with the vendor's updater — stays invisible until the
+        integration is reloaded. Observed on hardware exactly that way.
+
+        Called from the byte callback, so the re-query is spawned as a task
+        rather than awaited here.
+        """
+        if self._handshake_active or not self._started:
+            # The handshake in flight fetches everything a refresh would.
+            self._recovery_pending = True
+            return
+        self._schedule_recovery_refresh()
+
+    def _schedule_recovery_refresh(self) -> None:
+        """Spawn the recovery re-query unless one is already in flight."""
+        if self._recovery_task is not None and not self._recovery_task.done():
+            return
+        self._recovery_task = asyncio.create_task(
+            self._recovery_refresh(), name="aiolumagen-recovery-refresh"
+        )
+
+    async def _recovery_refresh(self) -> None:
+        """Re-run the handshake's queries after an unhandshaken recovery.
+
+        Reuses the full startup sequence, ``ZE2`` included: re-asserting echo
+        off is harmless, and correct if what came back is a replugged or
+        swapped device rather than the one that left.
+        """
+        _LOGGER.debug("Lumagen recovered without a handshake; re-querying device state")
+        await self._run_handshake()
+
+    async def _cancel_recovery(self) -> None:
+        """Cancel an in-flight recovery re-query and wait for it to unwind."""
+        task = self._recovery_task
+        self._recovery_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _send_startup_sequence(self) -> bool:
         """ZE2 echo-off, then initial queries with retry.
+
+        Returns whether the device answered ``ZQS01``. Call it through
+        :meth:`_run_handshake`, which keeps the recovery bookkeeping straight.
 
         Two attempts at 1.5 seconds apart is plenty of headroom — once
         serialx reports the transport connected the link is just a byte
@@ -1037,7 +1121,7 @@ class LumagenClient:
                 await self.query_device_info(timeout=retry_interval)
             except LumagenConnectionError:
                 _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
-                return
+                return False
             except TimeoutError:
                 if attempt < max_retries - 1:
                     _LOGGER.debug(
@@ -1066,7 +1150,9 @@ class LumagenClient:
                 )
             except LumagenConnectionError:
                 _LOGGER.warning("Lumagen startup queries aborted - transport disconnected")
-                return
+                # !S01 already landed, so device info is current; the rest is
+                # the next handshake's job once the link is back.
+                return True
             except TimeoutError:
                 status = ""
             # The Full v5 push doesn't carry sharpness / game mode / auto
@@ -1075,7 +1161,7 @@ class LumagenClient:
             await self._query_secondary_status()
             if not status:
                 self._warn_no_full_status()
-            return
+            return True
 
         _LOGGER.warning(
             "Lumagen startup handshake: no response after %d attempts "
@@ -1083,6 +1169,7 @@ class LumagenClient:
             max_retries,
             max_retries * retry_interval,
         )
+        return False
 
     def _warn_no_full_status(self) -> None:
         """Warn that the device identified itself but never reported status.
@@ -1241,6 +1328,9 @@ class LumagenClient:
         loop = asyncio.get_running_loop()
         if loop.time() < self._next_reconnect_at:
             return
+        # A recovery re-query still running belongs to the transport we're
+        # about to tear down; the reconnect runs its own handshake.
+        await self._cancel_recovery()
         try:
             await self._transport.disconnect()
             await asyncio.sleep(self.RECONNECT_SETTLE)
@@ -1250,7 +1340,7 @@ class LumagenClient:
             return
         self._connected_at = loop.time()
         self._protocol.reset()
-        await self._send_startup_sequence()
+        await self._run_handshake()
         # _on_bytes_received resets the backoff when the device answers; an
         # open transport that stays silent is the half-open case and counts
         # as a failure, or it would be retried every tick without backing off.
@@ -1292,6 +1382,7 @@ class LumagenClient:
                 )
             else:
                 _LOGGER.info("Lumagen is now available (first response received)")
+            self._on_recovered()
         # The link has proven itself; the next outage starts from a clean
         # backoff with an immediate first attempt.
         self._reconnect_delay = self.RECONNECT_BACKOFF_INITIAL
